@@ -7,22 +7,26 @@ column width (total trailer width / 2).
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-# Diagram totals ("T-25 Mechanix '25", inches). The diagram gives the dancefloor
-# and general areas as a TOTAL length and a TOTAL width spanning two columns.
+# Trailer totals (inches), per measurements shared 2026. The dancefloor and
+# general areas are given as a TOTAL length and a TOTAL width spanning two columns.
 DANCEFLOOR_SLOTS = {1, 2}
 DIAGRAM = dict(
-    dancefloor_length=120.0, dancefloor_total_width=96.0,
-    general_length=480.0, general_total_width=98.0,
+    dancefloor_length=129.0, dancefloor_total_width=98.0,
+    general_length=483.0, general_total_width=98.0,
 )
 
-# DEFAULT_GEOM holds the USABLE per-slot dimensions the fit math consumes. The
-# defaults are the even-split reading of the diagram (each slot = one column,
-# so width = total/2). Every value here is independently tunable from the UI.
+# DEFAULT_GEOM holds the USABLE dimensions the fit math consumes.
+#   *_length : the along-slot capacity for one slot (one column, one row cell).
+#   *_width  : the TOTAL width shared by the two paired columns in a row. A lone
+#              item may use all of it; when both columns of a row are occupied,
+#              their widths must sum to <= this (paired-column constraint).
+# Field data shows single items up to 90in wide sitting in one column, so width
+# is NOT split per slot — the two columns share the total width per row.
 DEFAULT_GEOM = dict(
     dancefloor_length=DIAGRAM["dancefloor_length"],
-    dancefloor_width=DIAGRAM["dancefloor_total_width"] / 2.0,   # even-split default
+    dancefloor_width=DIAGRAM["dancefloor_total_width"],    # shared across the row
     general_length=DIAGRAM["general_length"],
-    general_width=DIAGRAM["general_total_width"] / 2.0,         # even-split default
+    general_width=DIAGRAM["general_total_width"],          # shared across the row
 )
 
 

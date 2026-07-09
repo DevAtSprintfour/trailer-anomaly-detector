@@ -9,10 +9,21 @@ tightest successful slot could physically have allowed has a WRONG stored size �
 The slot geometry constants are a tunable outer ceiling, not per-item truth. Goal: a pass/fail
 list, especially a trustworthy "good fail" list, blame pinned to an individual where possible.
 
-## Model
-For a used slot with along-capacity L, width W, harness gap g, items i:
-  (a) width:  each item's shorter side <= W  (a worked slot proves true width <= W)
-  (b) length: sum(item along-dim) + (n-1)*g <= L
+## Trailer dimensions (shared 2026, tunable in UI)
+  Dancefloor (slots 1,2): length 129, total width 98.
+  General (slots 3-10):   length 483, total width 98.
+Width is NOT split per column: field data shows single items up to 90in wide in one
+column, so a lone item may use the full 98in. The two columns SHARE the width per row.
+
+## Model — PAIRED COLUMNS
+Slots pair into rows: (1,2),(3,4),(5,6),(7,8),(9,10). Left = odd, right = even.
+For a used slot with along-capacity L, gap g, items i, and total row width W:
+  (a) single-item width: each item's shorter side <= W (a lone item may use full W).
+  (b) paired width: when both columns of a row are occupied, widest(left) +
+      widest(right) <= W. A used row proves this held for the true sizes.
+  (c) length: sum(item along-dim) + (n-1)*g <= L, per slot.
+Blame: the side whose width alone exceeds W is the culprit (unique); both-fit-alone-
+but-not-together or both-oversize -> ambiguous pair.
 Rotation allowed per item; take the most-forgiving axis. These are KNOWN TRUE for real sizes.
 We check the STORED sizes against them:
   - Width anomaly: stored shorter side > W of a slot it was used in → impossible → stored width

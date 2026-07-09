@@ -123,21 +123,68 @@ def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
     missing_ids = set(df.loc[df["dims_missing"], "equipment_id"].dropna().astype(int))
     eq_ids = set(df["equipment_id"].dropna().astype(int))
 
-    # 1) Width anomalies: a used slot proves each item's true width <= cap_width.
-    #    If stored shorter-side > cap_width, the stored dims are physically
-    #    impossible for that slot -> unique, unambiguous.
+    # 1a) Single-item width: a used slot proves each item's true width <= total
+    #     row width (a lone item may occupy the full width). If stored shorter-side
+    #     exceeds even the full width, that stored dim is physically impossible.
     width_bad: Dict[int, dict] = {}
+
+    def flag_width(eid, excess, **info):
+        cur = width_bad.get(eid)
+        if cur is None or excess > cur["excess"]:
+            width_bad[eid] = dict(excess=round(excess, 1), **info)
+
     for s in slots:
         for it in s.items:
             short = min(it.length, it.width)
             if short > s.cap_width + tolerance:
-                excess = short - s.cap_width
-                cur = width_bad.get(it.equipment_id)
-                if cur is None or excess > cur["excess"]:
-                    width_bad[it.equipment_id] = dict(
-                        excess=round(excess, 1), slot=s.slot, race=s.race_id,
-                        trailer=s.trailer_name, cap_width=s.cap_width,
-                        stored_short=short)
+                flag_width(it.equipment_id, short - s.cap_width, slot=s.slot,
+                           race=s.race_id, trailer=s.trailer_name,
+                           cap_width=s.cap_width, stored_short=short,
+                           kind_detail="wider than the full trailer width")
+
+    # 1b) Paired-column width: slots pair into rows (1&2, 3&4, ...) that SHARE the
+    #     total width. When both columns of a row are occupied, the left and right
+    #     items must fit side-by-side: min-side(left) + min-side(right) <= width.
+    #     A used row proves this held for the true sizes, so if the STORED shorter
+    #     sides overflow it, >=1 stored width is inflated. Unique blame: the item
+    #     whose removal reconciles the pair.
+    by_row: Dict[tuple, Dict[str, UsedSlot]] = {}
+    for s in slots:
+        row = (s.slot + 1) // 2                 # 1,2->1 ; 3,4->2 ; ...
+        side = "L" if s.slot % 2 == 1 else "R"
+        by_row.setdefault((s.race_id, s.trailer_id, s.trailer_name, row, s.cap_width),
+                          {})[side] = s
+
+    pair_ambiguous: set = set()
+    for (race, tid, tname, row, cap_w), sides in by_row.items():
+        if "L" not in sides or "R" not in sides:
+            continue                            # lone column: covered by 1a
+        left = [(it, min(it.length, it.width)) for it in sides["L"].items]
+        right = [(it, min(it.length, it.width)) for it in sides["R"].items]
+        if not left or not right:
+            continue
+        # widest item in each column defines the side-by-side footprint
+        lmax_it, lmax = max(left, key=lambda x: x[1])
+        rmax_it, rmax = max(right, key=lambda x: x[1])
+        total = lmax + rmax
+        if total <= cap_w + tolerance:
+            continue                            # pair fits — consistent
+        excess = total - cap_w
+        # Which side is the culprit? The side whose width alone already exceeds the
+        # full trailer width can't be right; the other side is exonerable.
+        left_over = lmax > cap_w + tolerance    # left too wide even alone
+        right_over = rmax > cap_w + tolerance
+        info = dict(slot=None, race=race, trailer=tname, cap_width=cap_w,
+                    kind_detail=f"paired row {row}: {lmax:.0f}+{rmax:.0f} > {cap_w:.0f}")
+        if cross_reference and left_over and not right_over:
+            flag_width(lmax_it.equipment_id, lmax - cap_w, stored_short=lmax, **info)
+        elif cross_reference and right_over and not left_over:
+            flag_width(rmax_it.equipment_id, rmax - cap_w, stored_short=rmax, **info)
+        else:
+            # both fit alone but not together (either could be inflated), or both
+            # exceed alone -> can't uniquely blame one -> ambiguous pair.
+            pair_ambiguous.add(lmax_it.equipment_id)
+            pair_ambiguous.add(rmax_it.equipment_id)
 
     # 2) Length anomalies via reconciliation. For each used slot whose STORED sizes
     #    overflow capacity, try to attribute. A slot that worked means the true
@@ -193,10 +240,8 @@ def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
             for it in s.items:
                 ambiguous.add(it.equipment_id)
 
-    # cross-reference exoneration: if an item is length-flagged in one slot but a
-    # slot-mate there is independently width_bad or length_bad in OTHER slots, the
-    # slot-mate may be the true cause. We already prefer unique resolvers, so keep
-    # width/length definite over ambiguous.
+    # Merge paired-column ambiguity, then let definite anomalies win over ambiguous.
+    ambiguous |= pair_ambiguous
     definite = set(width_bad) | set(length_bad)
     ambiguous -= definite
 
@@ -206,11 +251,13 @@ def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
         n_slots = len(appears.get(eid, []))
         if eid in width_bad:
             wb = width_bad[eid]
+            where = (f"slot {wb['slot']}" if wb.get("slot") is not None
+                     else wb.get("kind_detail", "a paired row"))
             verdict[eid] = dict(
                 status=FAIL, unique=True, kind="width",
-                reason=(f"stored width {wb['stored_short']:.0f}in > slot {wb['slot']} "
-                        f"width {wb['cap_width']:.0f}in, but the load sheet shows it fit "
-                        f"there → stored width is wrong"),
+                reason=(f"stored width {wb['stored_short']:.0f}in can't fit {where} "
+                        f"(width {wb['cap_width']:.0f}in), but the load sheet shows it fit "
+                        f"→ stored width is wrong"),
                 excess_in=wb["excess"], worst_slot=wb, slots_used=n_slots)
         elif eid in length_bad:
             lb = length_bad[eid]
