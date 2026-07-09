@@ -1,0 +1,12 @@
+# Data-export code lives outside version control (contains DB credentials)
+export/
+
+# Python virtualenv
+.venv/
+__pycache__/
+*.pyc
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
