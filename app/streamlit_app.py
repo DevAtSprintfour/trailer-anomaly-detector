@@ -114,8 +114,8 @@ k5.metric("❔ No stored dims", counts[UNKNOWN])
 
 st.divider()
 
-tab_fail, tab_all, tab_slot = st.tabs(
-    ["🎯 Good-fail list (verify these)", "All equipment", "🔍 Slot drill-down"])
+tab_fail, tab_trailer, tab_all, tab_slot = st.tabs(
+    ["🎯 Good-fail list (verify these)", "🚛 By trailer", "All equipment", "🔍 Slot drill-down"])
 
 # --- Good-fail list ---
 with tab_fail:
@@ -143,6 +143,81 @@ with tab_fail:
                      use_container_width=True, hide_index=True)
         st.download_button("⬇ Download unknown-dims list (CSV)",
                            unk.to_csv(index=False), "unknown_dims_2026.csv", "text/csv")
+
+# --- By trailer ---
+with tab_trailer:
+    st.subheader("Pass / fail by trailer, across all 2026 races")
+    st.caption("A trailer is FAIL if any equipment ever loaded on it has a wrong stored "
+               "dimension; AMBIGUOUS if it only has unresolvable cases; else PASS. "
+               "Counts are of distinct equipment ever assigned to that trailer.")
+
+    # map each (equipment) to its verdict status, then aggregate per trailer.
+    vstatus = {eid: v["status"] for eid, v in verdict.items()}
+    tw = work[["trailer_name", "trailer_view", "equipment_id"]].dropna(subset=["equipment_id"]).copy()
+    tw["equipment_id"] = tw["equipment_id"].astype(int)
+    tw["status"] = tw["equipment_id"].map(vstatus)
+
+    def trailer_status(statuses):
+        s = set(statuses)
+        if FAIL in s:
+            return FAIL
+        if AMBIGUOUS in s:
+            return AMBIGUOUS
+        if s <= {PASS, UNKNOWN} and UNKNOWN in s and PASS not in s:
+            return UNKNOWN
+        return PASS
+
+    trows = []
+    for (tname, tview), g in tw.groupby(["trailer_name", "trailer_view"], sort=False):
+        per_eq = g.drop_duplicates("equipment_id")
+        c = per_eq["status"].value_counts()
+        trows.append(dict(
+            trailer=tname, view=tview,
+            status=trailer_status(per_eq["status"]),
+            equipment=int(per_eq["equipment_id"].nunique()),
+            fail=int(c.get(FAIL, 0)), ambiguous=int(c.get(AMBIGUOUS, 0)),
+            unknown=int(c.get(UNKNOWN, 0)), consistent=int(c.get(PASS, 0)),
+            races=int(work[work.trailer_name == tname]["race_id"].nunique()),
+        ))
+    tsummary = pd.DataFrame(trows).sort_values(
+        ["status", "fail", "ambiguous"],
+        key=lambda s: s.map({FAIL: 0, AMBIGUOUS: 1, UNKNOWN: 2, PASS: 3}) if s.name == "status" else s,
+        ascending=[True, False, False])
+
+    tc1, tc2, tc3 = st.columns(3)
+    tc1.metric("Trailers", len(tsummary))
+    tc2.metric("❌ With a failure", int((tsummary.status == FAIL).sum()))
+    tc3.metric("✅ Clean", int((tsummary.status == PASS).sum()))
+
+    def tcolor(v):
+        return f"color: {STATUS_COLOR.get(v, '#000')}; font-weight:600"
+    st.dataframe(tsummary.style.map(tcolor, subset=["status"]),
+                 use_container_width=True, hide_index=True)
+    st.download_button("⬇ Download trailer summary (CSV)",
+                       tsummary.to_csv(index=False), "trailer_summary_2026.csv", "text/csv")
+
+    st.markdown("---")
+    st.markdown("#### Drill down: equipment on a trailer")
+    pick = st.selectbox("Trailer", tsummary["trailer"].tolist())
+    detail = work[work.trailer_name == pick].dropna(subset=["equipment_id"]).copy()
+    detail["equipment_id"] = detail["equipment_id"].astype(int)
+    detail["status"] = detail["equipment_id"].map(vstatus)
+    detail["reason"] = detail["equipment_id"].map(lambda e: verdict.get(e, {}).get("reason"))
+    # one row per (equipment, race, slot) so you see where it rode
+    show = (detail[["status", "equipment_id", "serial_number", "equipment_desc",
+                    "eq_length", "eq_width", "race_id", "slot", "trailer_view", "reason"]]
+            .sort_values(["status", "equipment_id", "race_id", "slot"],
+                         key=lambda s: s.map({FAIL: 0, AMBIGUOUS: 1, UNKNOWN: 2, PASS: 3})
+                         if s.name == "status" else s))
+    only_anom = st.checkbox("Show only failed / ambiguous / unknown", value=True)
+    if only_anom:
+        show = show[show.status.isin([FAIL, AMBIGUOUS, UNKNOWN])]
+    st.write(f"**{pick}** — {detail['equipment_id'].nunique()} distinct equipment across "
+             f"{detail['race_id'].nunique()} races.")
+    st.dataframe(show.style.map(tcolor, subset=["status"]),
+                 use_container_width=True, hide_index=True)
+    st.download_button(f"⬇ Download {pick} equipment (CSV)",
+                       show.to_csv(index=False), f"trailer_{pick}_equipment.csv", "text/csv")
 
 # --- All equipment ---
 with tab_all:
