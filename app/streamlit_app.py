@@ -25,16 +25,34 @@ st.set_page_config(page_title="Trailer Floor Anomaly Detector", layout="wide")
 
 
 @st.cache_data
-def load_data():
+def load_data(_ls_mtime: float, _races_mtime: float):
+    """Load loadsheet and always attach race_name from races_2026.csv.
+
+    mtime args bust Streamlit's cache when the CSVs change on disk.
+    """
     ls = pd.read_csv(os.path.join(DATA, "loadsheet_2026.csv"))
+    races_path = os.path.join(DATA, "races_2026.csv")
+    if os.path.exists(races_path):
+        races = pd.read_csv(races_path)[["race_id", "race_name"]].drop_duplicates("race_id")
+        if "race_name" in ls.columns:
+            ls = ls.drop(columns=["race_name"])
+        ls = ls.merge(races, on="race_id", how="left")
     return ls
 
 
-ls = load_data()
+_ls_path = os.path.join(DATA, "loadsheet_2026.csv")
+_races_path = os.path.join(DATA, "races_2026.csv")
+ls = load_data(
+    os.path.getmtime(_ls_path),
+    os.path.getmtime(_races_path) if os.path.exists(_races_path) else 0.0,
+)
 
 # ------------------------------------------------------------------ sidebar
 st.sidebar.title("Controls")
 st.sidebar.caption("2026 season · load sheet trusted · floor-level 2D packing")
+if st.sidebar.button("Reload data (clear cache)"):
+    st.cache_data.clear()
+    st.rerun()
 
 views = sorted(ls["trailer_view"].dropna().unique())
 default_views = [v for v in views if v != "Awning"]
@@ -103,8 +121,10 @@ race_labels = {}
 race_label_to_id = {}
 for rid, g in work.groupby("race_id"):
     rid = int(rid)
-    names = g["race_name"].dropna().unique() if "race_name" in g.columns else []
-    name = str(names[0]) if len(names) else f"Race {rid}"
+    names = []
+    if "race_name" in g.columns:
+        names = [n for n in g["race_name"].dropna().unique().tolist() if str(n).strip()]
+    name = str(names[0]).strip() if names else f"Race {rid}"
     dates = g["race_date"].dropna().unique()
     date = str(dates[0])[:10] if len(dates) else None
     mark = " ⚠" if rid in overflow_races else ""
