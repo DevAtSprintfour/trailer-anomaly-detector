@@ -1,51 +1,53 @@
-"""Trailer geometry + slot-fit math. Pure functions, no I/O — unit-testable.
+"""Trailer floor geometry + 2D packing. Pure functions, no I/O — unit-testable.
 
-The trailer has two columns of slots. Slots 1 & 2 are the dancefloor; 3-10 are
-general floor. Each slot occupies one column, so its usable width is the
-column width (total trailer width / 2).
+The trailer has two floors (not ten slots):
+  - dance: slots 1–2 map here; one rectangle
+  - general: slots 3–10 map here; one rectangle
+
+Slot numbers on the load sheet only classify which floor an item rode on.
+Packing is full 2D rectangle packing inside each floor with per-item 90°
+rotation and a harness gap between items.
 """
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-# Trailer totals (inches), per measurements shared 2026. The dancefloor and
-# general areas are given as a TOTAL length and a TOTAL width spanning two columns.
 DANCEFLOOR_SLOTS = {1, 2}
+FLOOR_DANCE = "dance"
+FLOOR_GENERAL = "general"
+
 DIAGRAM = dict(
     dancefloor_length=129.0, dancefloor_total_width=98.0,
     general_length=483.0, general_total_width=98.0,
 )
 
-# DEFAULT_GEOM holds the USABLE dimensions the fit math consumes.
-#   *_length : the along-slot capacity for one slot (one column, one row cell).
-#   *_width  : the TOTAL width shared by the two paired columns in a row. A lone
-#              item may use all of it; when both columns of a row are occupied,
-#              their widths must sum to <= this (paired-column constraint).
-# Field data shows single items up to 90in wide sitting in one column, so width
-# is NOT split per slot — the two columns share the total width per row.
 DEFAULT_GEOM = dict(
     dancefloor_length=DIAGRAM["dancefloor_length"],
-    dancefloor_width=DIAGRAM["dancefloor_total_width"],    # shared across the row
+    dancefloor_width=DIAGRAM["dancefloor_total_width"],
     general_length=DIAGRAM["general_length"],
-    general_width=DIAGRAM["general_total_width"],          # shared across the row
+    general_width=DIAGRAM["general_total_width"],
 )
 
 
 @dataclass
-class SlotGeom:
-    length: float          # usable length along the slot (inches)
-    width: float           # usable width of the slot (inches)
+class FloorGeom:
+    length: float
+    width: float
+    name: str  # 'dance' | 'general'
 
 
-def slot_geometry(slot: int, geom: dict = None) -> SlotGeom:
-    """Return usable (length, width) for a slot number.
+def floor_for_slot(slot: int) -> str:
+    return FLOOR_DANCE if int(slot) in DANCEFLOOR_SLOTS else FLOOR_GENERAL
 
-    `geom` may supply any of dancefloor_length/dancefloor_width/general_length/
-    general_width to override the even-split diagram defaults.
-    """
+
+def floor_geometry(floor: str, geom: dict = None) -> FloorGeom:
     g = {**DEFAULT_GEOM, **(geom or {})}
-    if slot in DANCEFLOOR_SLOTS:
-        return SlotGeom(g["dancefloor_length"], g["dancefloor_width"])
-    return SlotGeom(g["general_length"], g["general_width"])
+    if floor == FLOOR_DANCE:
+        return FloorGeom(g["dancefloor_length"], g["dancefloor_width"], FLOOR_DANCE)
+    if floor == FLOOR_GENERAL:
+        return FloorGeom(g["general_length"], g["general_width"], FLOOR_GENERAL)
+    raise ValueError(f"unknown floor: {floor}")
 
 
 @dataclass
@@ -57,64 +59,178 @@ class Item:
 
 
 @dataclass
-class FitResult:
+class Placement:
+    equipment_id: int
+    x: float
+    y: float
+    w: float  # placed width (after rotation choice)
+    h: float  # placed height (along length axis)
+
+
+@dataclass
+class PackResult:
     fits: bool
-    orientation: str            # 'lengthwise' | 'widthwise' | 'none'
-    used: float                 # packed dimension along slot length (in)
-    capacity: float             # slot length available (in)
-    overflow: float             # max(0, used - capacity) for the best arrangement
-    width_violation: bool       # an item too wide for the slot even rotated
+    placements: List[Placement] = field(default_factory=list)
+    area_used: float = 0.0
+    area_cap: float = 0.0
+    area_overflow: float = 0.0  # max(0, area_used - area_cap) when no fit
     detail: str = ""
 
 
-def _pack_along(items: List[Item], slot: SlotGeom, gap: float,
-                axis: str) -> Tuple[bool, float, bool]:
-    """Try to lay items in a single row along the slot length.
+def _orientations(it: Item) -> List[Tuple[float, float]]:
+    """Return unique (w, h) orientations. w along floor width, h along floor length."""
+    opts = [(it.width, it.length), (it.length, it.width)]
+    # de-dupe squares
+    seen, out = set(), []
+    for w, h in opts:
+        key = (round(w, 6), round(h, 6))
+        if key not in seen:
+            seen.add(key)
+            out.append((w, h))
+    return out
 
-    axis='lengthwise': each item contributes its length to the running total and
-      its width must fit the slot width (item may rotate to achieve this).
-    axis='widthwise' : the roles swap (item contributes its width to the total,
-      its length must fit the slot width).
-    Per-item rotation is allowed: for each item we pick the orientation that (a)
-    satisfies the cross-dimension cap and (b) minimizes the along-slot dimension.
-    Returns (all_widths_ok, total_along + gaps, any_width_violation).
+
+def _inflate(w: float, h: float, gap: float) -> Tuple[float, float]:
+    """Inflate by gap on the far edges so adjacent items keep gap between them.
+    Packing into (W+gap) x (L+gap) makes edge gaps cancel — only inter-item gaps count.
     """
-    n = len(items)
-    total = 0.0
-    width_violation = False
+    return w + gap, h + gap
+
+
+@dataclass
+class _FreeRect:
+    x: float
+    y: float
+    w: float
+    h: float
+
+
+def _fits_in(fr: _FreeRect, w: float, h: float) -> bool:
+    return w <= fr.w + 1e-9 and h <= fr.h + 1e-9
+
+
+def _score_bssf(fr: _FreeRect, w: float, h: float) -> Tuple[float, float]:
+    """Best Short Side Fit: minimize leftover short side, then long side."""
+    short = min(fr.w - w, fr.h - h)
+    long = max(fr.w - w, fr.h - h)
+    return (short, long)
+
+
+def _prune_free(free: List[_FreeRect]) -> List[_FreeRect]:
+    """Drop free rects fully contained in another."""
+    kept: List[_FreeRect] = []
+    for i, a in enumerate(free):
+        contained = False
+        for j, b in enumerate(free):
+            if i == j:
+                continue
+            if (a.x >= b.x - 1e-9 and a.y >= b.y - 1e-9
+                    and a.x + a.w <= b.x + b.w + 1e-9
+                    and a.y + a.h <= b.y + b.h + 1e-9):
+                contained = True
+                break
+        if not contained and a.w > 1e-9 and a.h > 1e-9:
+            kept.append(a)
+    return kept
+
+
+def _try_pack_order(items: List[Item], bin_w: float, bin_h: float,
+                    gap: float) -> Optional[List[Placement]]:
+    """MaxRects-BSSF for one item order. bin is already inflated (W+gap, L+gap)."""
+    free = [_FreeRect(0.0, 0.0, bin_w, bin_h)]
+    placements: List[Placement] = []
+
     for it in items:
-        # The two possible (along, across) pairings for this item.
-        opts = [(it.length, it.width), (it.width, it.length)]
-        if axis == "widthwise":
-            opts = [(it.width, it.length), (it.length, it.width)]
-        # Keep orientations whose across-dimension fits the slot width.
-        valid = [(along, across) for (along, across) in opts if across <= slot.width]
-        if not valid:
-            width_violation = True
-            # still count its smaller along-dim so overflow is meaningful
-            total += min(along for along, _ in opts)
-        else:
-            total += min(along for along, _ in valid)
-    total += max(0, n - 1) * gap
-    return (not width_violation), total, width_violation
-
-
-def evaluate_slot(items: List[Item], slot: SlotGeom, gap: float) -> FitResult:
-    """Best-of-both-orientations fit for a set of items sharing one slot."""
-    if not items:
-        return FitResult(True, "none", 0.0, slot.length, 0.0, False, "empty")
-
-    best = None
-    for axis in ("lengthwise", "widthwise"):
-        widths_ok, used, wviol = _pack_along(items, slot, gap, axis)
-        overflow = max(0.0, used - slot.length)
-        fits = widths_ok and overflow <= 1e-9
-        cand = FitResult(fits, axis, used, slot.length, overflow, wviol)
-        # Prefer a fitting arrangement; else the one with least overflow.
+        best = None  # (score, fr_idx, x, y, w, h)  — w/h are inflated
+        for fr_i, fr in enumerate(free):
+            for ow, oh in _orientations(it):
+                iw, ih = _inflate(ow, oh, gap)
+                if not _fits_in(fr, iw, ih):
+                    continue
+                score = _score_bssf(fr, iw, ih)
+                cand = (score, fr_i, fr.x, fr.y, iw, ih, ow, oh)
+                if best is None or cand[0] < best[0]:
+                    best = cand
         if best is None:
-            best = cand
-        elif cand.fits and not best.fits:
-            best = cand
-        elif cand.fits == best.fits and cand.overflow < best.overflow:
-            best = cand
-    return best
+            return None
+        _, fr_i, x, y, iw, ih, ow, oh = best
+        placements.append(Placement(it.equipment_id, x, y, ow, oh))
+        # split the chosen free rect; also punch the placed rect out of all free rects
+        new_free: List[_FreeRect] = []
+        for fr in free:
+            # no overlap with placed inflated rect
+            if (x + iw <= fr.x + 1e-9 or fr.x + fr.w <= x + 1e-9
+                    or y + ih <= fr.y + 1e-9 or fr.y + fr.h <= y + 1e-9):
+                new_free.append(fr)
+                continue
+            # overlap — split into up to 4 remainders (MaxRects)
+            if x > fr.x + 1e-9:  # left
+                new_free.append(_FreeRect(fr.x, fr.y, x - fr.x, fr.h))
+            if x + iw < fr.x + fr.w - 1e-9:  # right
+                new_free.append(_FreeRect(x + iw, fr.y, (fr.x + fr.w) - (x + iw), fr.h))
+            if y > fr.y + 1e-9:  # below
+                new_free.append(_FreeRect(fr.x, fr.y, fr.w, y - fr.y))
+            if y + ih < fr.y + fr.h - 1e-9:  # above
+                new_free.append(_FreeRect(fr.x, y + ih, fr.w, (fr.y + fr.h) - (y + ih)))
+        free = _prune_free(new_free)
+    return placements
+
+
+def pack_floor(items: List[Item], length: float, width: float,
+               gap: float = 2.0) -> PackResult:
+    """2D-pack items into a floor rectangle (length × width).
+
+    Rotation allowed. Harness gap is reserved between items (not beyond the
+    floor edges). Returns fits=True if any tried order packs successfully.
+    """
+    area_cap = length * width
+    if not items:
+        return PackResult(True, [], 0.0, area_cap, 0.0, "empty")
+
+    # Impossible if any single item can't fit even alone (either orientation).
+    for it in items:
+        alone_ok = any(ow <= width + 1e-9 and oh <= length + 1e-9
+                       for ow, oh in _orientations(it))
+        if not alone_ok:
+            area_used = sum(it.length * it.width for it in items)
+            return PackResult(
+                False, [], area_used, area_cap,
+                max(0.0, area_used - area_cap),
+                f"item {it.equipment_id} ({it.length:.0f}×{it.width:.0f}) "
+                f"cannot fit floor {length:.0f}×{width:.0f} alone",
+            )
+
+    area_used = sum(it.length * it.width for it in items)
+    bin_w, bin_h = width + gap, length + gap
+
+    # Try several sort orders — MaxRects quality depends on insertion order.
+    orders = [
+        sorted(items, key=lambda it: max(it.length, it.width), reverse=True),
+        sorted(items, key=lambda it: it.length * it.width, reverse=True),
+        sorted(items, key=lambda it: min(it.length, it.width), reverse=True),
+        list(items),
+    ]
+    # de-dupe identical orders by equipment id sequence
+    seen_orders, unique_orders = set(), []
+    for ord_ in orders:
+        key = tuple(it.equipment_id for it in ord_)
+        if key not in seen_orders:
+            seen_orders.add(key)
+            unique_orders.append(ord_)
+
+    for ord_ in unique_orders:
+        placed = _try_pack_order(ord_, bin_w, bin_h, gap)
+        if placed is not None:
+            return PackResult(True, placed, area_used, area_cap, 0.0, "packed")
+
+    return PackResult(
+        False, [], area_used, area_cap,
+        max(0.0, area_used - area_cap),
+        "no feasible 2D packing",
+    )
+
+
+# Back-compat aliases used by older imports / tests during transition
+def slot_geometry(slot: int, geom: dict = None) -> FloorGeom:
+    """Deprecated: returns floor geometry for the floor that owns this slot."""
+    return floor_geometry(floor_for_slot(slot), geom)

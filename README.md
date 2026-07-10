@@ -1,10 +1,10 @@
-# Trailer Slot Anomaly Detector (2026 season)
+# Trailer Floor Anomaly Detector (2026 season)
 
 Flags equipment whose **stored dimensions are likely wrong**. Premise: the 2026 load
-sheet (which equipment goes in which trailer slot) is **trusted** — it's used in the
-field without problems. Trailer slot geometry is **fixed**. So if the equipment
-assigned to a slot *overflows* that slot on paper, the equipment's stored length/width
-is the suspect. Those become a **pass/fail list for manual scanner verification**.
+sheet is **trusted** — equipment that rode on a trailer floor *did* fit. Slot numbers
+only classify **dance floor** (1–2) vs **general floor** (3–10). Each floor is one
+rectangle; we 2D-pack stored sizes into it. If they cannot pack, the stored dims are
+the suspect → pass/fail list for manual scanner verification.
 
 ## Layout
 ```
@@ -14,11 +14,11 @@ trailer-anomaly/
 │   ├── loadsheet_2026.csv    5,613 assignments, dims joined
 │   ├── equipment_2026.csv    284 distinct equipment
 │   ├── trailers_2026.csv     30 trailers + view class
-│   └── slots_2026.csv        slot occupancy
+│   └── slots_2026.csv        slot occupancy (reference)
 ├── app/                   the analyzer
-│   ├── geometry.py           slot dims + fit math (rotation, gaps)
-│   ├── analysis.py           load-sheet-as-truth engine + blame isolation
-│   ├── test_logic.py         unit tests for the above
+│   ├── geometry.py           floor dims + 2D packer (rotation, gaps)
+│   ├── analysis.py           floor-level engine + blame isolation
+│   ├── test_logic.py         unit tests
 │   └── streamlit_app.py      the UI
 └── docs/DESIGN.md         full design + locked decisions
 ```
@@ -38,27 +38,15 @@ streamlit run app/streamlit_app.py
 
 Open the local URL Streamlit prints. To run the tests: `python app/test_logic.py`.
 
-## How it works — load sheets are the source of truth
-- **Premise**: if a slot was used on a load sheet, its equipment *did* fit. We do not
-  trust the stored dimensions; each used slot is a **constraint** the true sizes satisfy.
-- **Trailer model**: two columns of slots. Slots 1–2 = dancefloor, 3–10 = general
-  floor. Each slot's usable **length** and **width** are **tunable in the sidebar**
-  (defaults are the even-split reading of the diagram: width = trailer width ÷ 2), and
-  act as an outer ceiling — the load sheets tighten the real per-item bound.
-- **Anomaly**: an equipment is flagged when its **stored** size contradicts a load
-  sheet that worked — its stored width exceeds a slot it fit in, or its stored length
-  makes a used slot overflow. Per-item 90° rotation and a tunable harness gap (between
-  items only) are allowed before calling a contradiction.
-- **Buckets**: `PASS` (consistent) · `FAIL` (stored dim wrong, unique blame) ·
-  `AMBIGUOUS` (shared-slot overflow, blame not separable) · `UNKNOWN` (missing dims).
-- **Blame isolation**: the item whose removal reconciles a shared slot is blamed;
-  an item already proven wrong elsewhere absorbs blame and exonerates its slot-mates.
-
-## Tuning
-The even-split defaults over-flag (a 146-in cart can't fit a 120×48 slot). Set the
-four slot dimensions to the **real trailer numbers** in the sidebar; the KPIs and
-good-fail list update live. What still fails at correct dimensions is a genuine
-anomaly to scan.
+## How it works
+- **Premise**: load sheets are ground truth. Stored WMS dims are tested against them.
+- **Two floors**: dance (129×98 in) and general (483×98 in), tunable in the sidebar.
+  Items from slots 1–2 pool into dance; slots 3–10 into general — per race + trailer.
+- **Packing**: MaxRects 2D packing with per-item 90° rotation and a harness gap.
+- **Buckets**: `PASS` · `FAIL` (unique blame) · `AMBIGUOUS` · `UNKNOWN`.
+- **Blame**: leave-one-out + cross-race isolation when possible.
+- **UI**: pick race (or All) and trailer (or All); see dance vs general fail counts
+  and expandable equipment details.
 
 ## Data sources
 The committed `data/*.csv` were produced from two internal databases:

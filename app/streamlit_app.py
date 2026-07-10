@@ -1,4 +1,4 @@
-"""Trailer Slot Anomaly Detector — Streamlit UI.
+"""Trailer Floor Anomaly Detector — Streamlit UI.
 
 Run from the project root:
     source .venv/bin/activate
@@ -8,53 +8,61 @@ import os
 import pandas as pd
 import streamlit as st
 
-from geometry import DEFAULT_GEOM, DANCEFLOOR_SLOTS, slot_geometry, Item, evaluate_slot
-from analysis import (analyze, summarize, build_used_slots, _fits_axis,
-                      PASS, FAIL, AMBIGUOUS, UNKNOWN)
+from geometry import (
+    DEFAULT_GEOM, Item, pack_floor, floor_geometry, floor_for_slot,
+    FLOOR_DANCE, FLOOR_GENERAL,
+)
+from analysis import (
+    analyze, summarize, build_used_floors,
+    PASS, FAIL, AMBIGUOUS, UNKNOWN,
+)
 
 DATA = os.path.join(os.path.dirname(__file__), "..", "data")
 STATUS_COLOR = {PASS: "#1a7f37", FAIL: "#cf222e", AMBIGUOUS: "#bf8700", UNKNOWN: "#6e7781"}
+ALL = "All"
 
-st.set_page_config(page_title="Trailer Slot Anomaly Detector", layout="wide")
+st.set_page_config(page_title="Trailer Floor Anomaly Detector", layout="wide")
 
 
 @st.cache_data
 def load_data():
     ls = pd.read_csv(os.path.join(DATA, "loadsheet_2026.csv"))
-    eq = pd.read_csv(os.path.join(DATA, "equipment_2026.csv"))
-    return ls, eq
+    return ls
 
 
-ls, eq = load_data()
+ls = load_data()
 
 # ------------------------------------------------------------------ sidebar
 st.sidebar.title("Controls")
-st.sidebar.caption("2026 season · load sheet is trusted · flagging suspect equipment dims")
+st.sidebar.caption("2026 season · load sheet trusted · floor-level 2D packing")
 
 views = sorted(ls["trailer_view"].dropna().unique())
 default_views = [v for v in views if v != "Awning"]
-sel_views = st.sidebar.multiselect("Trailer views", views, default=default_views,
-                                    help="Awning view is excluded by default per spec.")
+sel_views = st.sidebar.multiselect(
+    "Trailer views", views, default=default_views,
+    help="Awning view is excluded by default.",
+)
 
-gap = st.sidebar.slider("Harness gap between items (in)", 0.0, 12.0, 2.0, 0.5,
-                        help="Gap reserved between adjacent equipment in a shared slot. "
-                             "N items → (N−1) gaps.")
+gap = st.sidebar.slider(
+    "Harness gap between items (in)", 0.0, 12.0, 2.0, 0.5,
+    help="Gap reserved between adjacent equipment on a floor.",
+)
 
-cross_ref = st.sidebar.toggle("Cross-reference blame isolation", value=True,
-                              help="On: pin blame to a specific item where possible. "
-                                   "Off: flag the whole overflowing slot group.")
+cross_ref = st.sidebar.toggle(
+    "Cross-reference blame isolation", value=True,
+    help="On: pin blame to a specific item where possible. "
+         "Off: flag the whole overflowing floor group.",
+)
 
-with st.sidebar.expander("Trailer slot dimensions (tunable)", expanded=True):
-    st.caption("Usable size **per slot**. Defaults are the even-split reading of the "
-               "diagram (width = total ÷ 2). Adjust to match the real trailer and watch "
-               "pass/fail converge.")
-    st.markdown("**Dancefloor slots (1, 2)**")
+with st.sidebar.expander("Floor dimensions (tunable)", expanded=False):
+    st.caption("Two floors only — dance and general. Slot numbers only classify which floor.")
+    st.markdown("**Dance floor** (slots 1–2)")
     da, db = st.columns(2)
     dl = da.number_input("Length (in)", value=float(DEFAULT_GEOM["dancefloor_length"]),
                          min_value=1.0, step=1.0, key="dl")
     dw = db.number_input("Width (in)", value=float(DEFAULT_GEOM["dancefloor_width"]),
                          min_value=1.0, step=1.0, key="dw")
-    st.markdown("**General slots (3–10)**")
+    st.markdown("**General floor** (slots 3–10)")
     ga, gb = st.columns(2)
     gl = ga.number_input("Length (in)", value=float(DEFAULT_GEOM["general_length"]),
                          min_value=1.0, step=1.0, key="gl")
@@ -62,216 +70,274 @@ with st.sidebar.expander("Trailer slot dimensions (tunable)", expanded=True):
                          min_value=1.0, step=1.0, key="gw")
     geom = dict(dancefloor_length=dl, dancefloor_width=dw,
                 general_length=gl, general_width=gw)
-    if st.button("↺ Reset to even-split defaults"):
+    if st.button("Reset to defaults"):
         for k in ("dl", "dw", "gl", "gw"):
             st.session_state.pop(k, None)
         st.rerun()
 
-# ------------------------------------------------------------------ compute
+# ------------------------------------------------------------------ filter + analyze
 work = ls[ls["trailer_view"].isin(sel_views)].copy()
+work["floor"] = work["slot"].map(floor_for_slot)
 
+# Race / trailer selectors (All allowed)
+race_labels = {}
+for rid, g in work.groupby("race_id"):
+    dates = g["race_date"].dropna().unique()
+    if len(dates):
+        d = str(dates[0])[:10]
+        race_labels[int(rid)] = f"Race {rid} ({d})"
+    else:
+        race_labels[int(rid)] = f"Race {rid}"
+
+race_options = [ALL] + [race_labels[r] for r in sorted(race_labels)]
+sel_race_label = st.sidebar.selectbox("Race", race_options, index=0)
+if sel_race_label == ALL:
+    race_filter = None
+else:
+    race_filter = next(r for r, lab in race_labels.items() if lab == sel_race_label)
+
+trailers_available = work if race_filter is None else work[work.race_id == race_filter]
+trailer_options = [ALL] + sorted(trailers_available["trailer_name"].dropna().unique().tolist())
+sel_trailer = st.sidebar.selectbox("Trailer", trailer_options, index=0)
+
+scoped = work.copy()
+if race_filter is not None:
+    scoped = scoped[scoped.race_id == race_filter]
+if sel_trailer != ALL:
+    scoped = scoped[scoped.trailer_name == sel_trailer]
+
+# Analyze on the view-filtered season (blame needs cross-race), then scope display
 verdict = analyze(work, gap=gap, geom=geom, cross_reference=cross_ref)
 counts = summarize(verdict)
 
-# per-equipment table
 eq_meta = (work[["equipment_id", "serial_number", "equipment_desc",
-                 "eq_length", "eq_width", "eq_height"]]
+                 "eq_length", "eq_width"]]
            .drop_duplicates("equipment_id").set_index("equipment_id"))
-rows = []
-for eid, v in verdict.items():
-    meta = eq_meta.loc[eid] if eid in eq_meta.index else None
-    ws = v["worst_slot"] or {}
-    rows.append(dict(
-        equipment_id=eid,
-        serial=(meta["serial_number"] if meta is not None else None),
-        description=(meta["equipment_desc"] if meta is not None else None),
-        stored_L=(meta["eq_length"] if meta is not None else None),
-        stored_W=(meta["eq_width"] if meta is not None else None),
-        status=v["status"], anomaly_kind=v["kind"], unique_blame=v["unique"],
-        inconsistency_in=v["excess_in"], slots_used=v["slots_used"],
-        reason=v["reason"],
-        evidence_race=ws.get("race"), evidence_trailer=ws.get("trailer"),
-        evidence_slot=ws.get("slot"),
-    ))
-table = pd.DataFrame(rows).sort_values(
-    ["status", "inconsistency_in"],
-    key=lambda s: s.map({FAIL: 0, AMBIGUOUS: 1, UNKNOWN: 2, PASS: 3}) if s.name == "status" else s,
-    ascending=[True, False])
 
-# ------------------------------------------------------------------ header + KPIs
-st.title("🚛 Trailer Slot Anomaly Detector")
-st.caption("**Load sheets are the source of truth.** A slot that was used means its "
-           "equipment fit. When an equipment's *stored* dimensions contradict a load "
-           "sheet that worked, the stored dimensions are wrong — flagged here for "
-           "manual scanner verification.")
+# Equipment that appears in the current race/trailer scope
+scoped_eids = set(scoped["equipment_id"].dropna().astype(int))
+
+
+def status_rank(s):
+    return s.map({FAIL: 0, AMBIGUOUS: 1, UNKNOWN: 2, PASS: 3})
+
+
+def color_status(v):
+    return f"color: {STATUS_COLOR.get(v, '#000')}; font-weight:600"
+
+
+def equipment_table(eids):
+    rows = []
+    for eid in eids:
+        if eid not in verdict:
+            continue
+        v = verdict[eid]
+        meta = eq_meta.loc[eid] if eid in eq_meta.index else None
+        wf = v.get("worst_floor") or {}
+        rows.append(dict(
+            equipment_id=eid,
+            serial=(meta["serial_number"] if meta is not None else None),
+            description=(meta["equipment_desc"] if meta is not None else None),
+            stored_L=(meta["eq_length"] if meta is not None else None),
+            stored_W=(meta["eq_width"] if meta is not None else None),
+            status=v["status"],
+            anomaly_kind=v["kind"],
+            inconsistency_in=v["excess_in"],
+            floors_used=v["floors_used"],
+            evidence_floor=wf.get("floor"),
+            evidence_race=wf.get("race"),
+            evidence_trailer=wf.get("trailer"),
+            reason=v["reason"],
+        ))
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(
+        ["status", "inconsistency_in"],
+        key=lambda s: status_rank(s) if s.name == "status" else s,
+        ascending=[True, False],
+    )
+
+
+# ------------------------------------------------------------------ header
+st.title("Trailer Floor Anomaly Detector")
+st.caption(
+    "Load sheets are ground truth. Equipment is pooled into **dance floor** "
+    "(slots 1–2) and **general floor** (slots 3–10). Stored dims that cannot "
+    "2D-pack into a floor that worked are flagged for re-scan."
+)
+
+scope_bits = []
+scope_bits.append("all races" if race_filter is None else race_labels[race_filter])
+scope_bits.append("all trailers" if sel_trailer == ALL else sel_trailer)
+st.info(f"Viewing: **{' · '.join(scope_bits)}**")
 
 k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Equipment evaluated", len(table))
-k2.metric("✅ Consistent", counts[PASS])
-k3.metric("❌ Stored dim wrong", counts[FAIL])
-k4.metric("⚠️ Ambiguous", counts[AMBIGUOUS])
-k5.metric("❔ No stored dims", counts[UNKNOWN])
+# KPIs for equipment in scope
+scoped_verdicts = {e: verdict[e] for e in scoped_eids if e in verdict}
+scoped_counts = summarize(scoped_verdicts) if scoped_verdicts else {PASS: 0, FAIL: 0, AMBIGUOUS: 0, UNKNOWN: 0}
+k1.metric("Equipment in scope", len(scoped_verdicts))
+k2.metric("Consistent", scoped_counts[PASS])
+k3.metric("Stored dim wrong", scoped_counts[FAIL])
+k4.metric("Ambiguous", scoped_counts[AMBIGUOUS])
+k5.metric("No stored dims", scoped_counts[UNKNOWN])
 
 st.divider()
 
-tab_fail, tab_trailer, tab_all, tab_slot = st.tabs(
-    ["🎯 Good-fail list (verify these)", "🚛 By trailer", "All equipment", "🔍 Slot drill-down"])
+# ------------------------------------------------------------------ floor cards
+floors = build_used_floors(scoped, geom)
+# Aggregate floor outcomes in scope
+floor_stats = {
+    FLOOR_DANCE: {"bins": 0, "overflow": 0, "fail_eq": set(), "amb_eq": set(), "items": 0},
+    FLOOR_GENERAL: {"bins": 0, "overflow": 0, "fail_eq": set(), "amb_eq": set(), "items": 0},
+}
 
-# --- Good-fail list ---
-with tab_fail:
-    st.subheader("Stored dimensions that contradict a working load sheet — scan these")
-    fails = table[table.status == FAIL].copy()
-    st.write(f"**{len(fails)}** equipment whose stored size is inconsistent with a load "
-             f"sheet that was used successfully — blame pinned to this specific item.")
-    st.dataframe(fails, use_container_width=True, hide_index=True)
-    st.download_button("⬇ Download good-fail list (CSV)",
+for f in floors:
+    stt = floor_stats[f.floor]
+    stt["bins"] += 1
+    stt["items"] += len(f.items)
+    result = pack_floor(f.items, f.cap_length, f.cap_width, gap) if f.items else None
+    overflowed = result is not None and not result.fits
+    if overflowed:
+        stt["overflow"] += 1
+    for it in f.items:
+        vs = verdict.get(it.equipment_id, {}).get("status")
+        if vs == FAIL:
+            stt["fail_eq"].add(it.equipment_id)
+        elif vs == AMBIGUOUS:
+            stt["amb_eq"].add(it.equipment_id)
+
+c_dance, c_gen = st.columns(2)
+
+
+def render_floor_card(col, floor_key, title):
+    fg = floor_geometry(floor_key, geom)
+    stt = floor_stats[floor_key]
+    n_fail = len(stt["fail_eq"])
+    n_amb = len(stt["amb_eq"])
+    with col:
+        st.subheader(title)
+        st.caption(f"{fg.length:.0f} × {fg.width:.0f} in · {stt['bins']} load(s) in scope")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Overflowing loads", stt["overflow"])
+        m2.metric("Failed equipment", n_fail)
+        m3.metric("Ambiguous", n_amb)
+
+        suspect_ids = stt["fail_eq"] | stt["amb_eq"]
+        with st.expander(f"Equipment details ({len(suspect_ids)} suspect)", expanded=n_fail + n_amb > 0):
+            if not suspect_ids:
+                st.write("No failed or ambiguous equipment on this floor in the current scope.")
+            else:
+                tbl = equipment_table(suspect_ids)
+                st.dataframe(
+                    tbl.style.map(color_status, subset=["status"]),
+                    use_container_width=True, hide_index=True,
+                )
+                st.download_button(
+                    f"Download {title} suspects (CSV)",
+                    tbl.to_csv(index=False),
+                    f"{floor_key}_suspects.csv",
+                    "text/csv",
+                    key=f"dl_{floor_key}",
+                )
+
+        with st.expander("All equipment on this floor", expanded=False):
+            all_ids = set()
+            for f in floors:
+                if f.floor == floor_key:
+                    for it in f.items:
+                        all_ids.add(it.equipment_id)
+            # also include missing-dim equipment from scoped rows
+            miss = scoped[(scoped.floor == floor_key) & scoped.dims_missing]
+            for eid in miss["equipment_id"].dropna().astype(int):
+                all_ids.add(eid)
+            if not all_ids:
+                st.write("No equipment on this floor in scope.")
+            else:
+                tbl = equipment_table(all_ids)
+                st.dataframe(
+                    tbl.style.map(color_status, subset=["status"]),
+                    use_container_width=True, hide_index=True,
+                )
+
+
+render_floor_card(c_dance, FLOOR_DANCE, "Dance floor")
+render_floor_card(c_gen, FLOOR_GENERAL, "General floor")
+
+st.divider()
+
+# ------------------------------------------------------------------ good-fail list (scoped)
+st.subheader("Good-fail list — re-scan these")
+fails = equipment_table({e for e in scoped_eids if verdict.get(e, {}).get("status") == FAIL})
+if fails.empty:
+    st.success("No uniquely blamed failures in this scope.")
+else:
+    st.write(f"**{len(fails)}** equipment with stored sizes that contradict a working floor load.")
+    st.dataframe(fails.style.map(color_status, subset=["status"]),
+                 use_container_width=True, hide_index=True)
+    st.download_button("Download good-fail list (CSV)",
                        fails.to_csv(index=False), "good_fail_list_2026.csv", "text/csv")
 
-    amb = table[table.status == AMBIGUOUS]
-    if len(amb):
-        st.subheader("Ambiguous (scan the whole group)")
-        st.caption("Overflowing multi-item slots where blame can't be pinned to one item.")
-        st.dataframe(amb, use_container_width=True, hide_index=True)
-        st.download_button("⬇ Download ambiguous list (CSV)",
-                           amb.to_csv(index=False), "ambiguous_list_2026.csv", "text/csv")
+amb_ids = {e for e in scoped_eids if verdict.get(e, {}).get("status") == AMBIGUOUS}
+if amb_ids:
+    with st.expander(f"Ambiguous ({len(amb_ids)}) — scan the group"):
+        amb = equipment_table(amb_ids)
+        st.dataframe(amb.style.map(color_status, subset=["status"]),
+                     use_container_width=True, hide_index=True)
 
-    unk = table[table.status == UNKNOWN]
-    if len(unk):
-        st.subheader("Unknown — missing/zero dimensions")
-        st.caption("No usable dims in WMS. A missing measurement is itself a data-quality flag.")
+unk_ids = {e for e in scoped_eids if verdict.get(e, {}).get("status") == UNKNOWN}
+if unk_ids:
+    with st.expander(f"Unknown dims ({len(unk_ids)})"):
+        unk = equipment_table(unk_ids)
         st.dataframe(unk[["equipment_id", "serial", "description", "reason"]],
                      use_container_width=True, hide_index=True)
-        st.download_button("⬇ Download unknown-dims list (CSV)",
-                           unk.to_csv(index=False), "unknown_dims_2026.csv", "text/csv")
-
-# --- By trailer ---
-with tab_trailer:
-    st.subheader("Pass / fail by trailer, across all 2026 races")
-    st.caption("A trailer is FAIL if any equipment ever loaded on it has a wrong stored "
-               "dimension; AMBIGUOUS if it only has unresolvable cases; else PASS. "
-               "Counts are of distinct equipment ever assigned to that trailer.")
-
-    # map each (equipment) to its verdict status, then aggregate per trailer.
-    vstatus = {eid: v["status"] for eid, v in verdict.items()}
-    tw = work[["trailer_name", "trailer_view", "equipment_id"]].dropna(subset=["equipment_id"]).copy()
-    tw["equipment_id"] = tw["equipment_id"].astype(int)
-    tw["status"] = tw["equipment_id"].map(vstatus)
-
-    def trailer_status(statuses):
-        s = set(statuses)
-        if FAIL in s:
-            return FAIL
-        if AMBIGUOUS in s:
-            return AMBIGUOUS
-        if s <= {PASS, UNKNOWN} and UNKNOWN in s and PASS not in s:
-            return UNKNOWN
-        return PASS
-
-    trows = []
-    for (tname, tview), g in tw.groupby(["trailer_name", "trailer_view"], sort=False):
-        per_eq = g.drop_duplicates("equipment_id")
-        c = per_eq["status"].value_counts()
-        trows.append(dict(
-            trailer=tname, view=tview,
-            status=trailer_status(per_eq["status"]),
-            equipment=int(per_eq["equipment_id"].nunique()),
-            fail=int(c.get(FAIL, 0)), ambiguous=int(c.get(AMBIGUOUS, 0)),
-            unknown=int(c.get(UNKNOWN, 0)), consistent=int(c.get(PASS, 0)),
-            races=int(work[work.trailer_name == tname]["race_id"].nunique()),
-        ))
-    tsummary = pd.DataFrame(trows).sort_values(
-        ["status", "fail", "ambiguous"],
-        key=lambda s: s.map({FAIL: 0, AMBIGUOUS: 1, UNKNOWN: 2, PASS: 3}) if s.name == "status" else s,
-        ascending=[True, False, False])
-
-    tc1, tc2, tc3 = st.columns(3)
-    tc1.metric("Trailers", len(tsummary))
-    tc2.metric("❌ With a failure", int((tsummary.status == FAIL).sum()))
-    tc3.metric("✅ Clean", int((tsummary.status == PASS).sum()))
-
-    def tcolor(v):
-        return f"color: {STATUS_COLOR.get(v, '#000')}; font-weight:600"
-    st.dataframe(tsummary.style.map(tcolor, subset=["status"]),
-                 use_container_width=True, hide_index=True)
-    st.download_button("⬇ Download trailer summary (CSV)",
-                       tsummary.to_csv(index=False), "trailer_summary_2026.csv", "text/csv")
-
-    st.markdown("---")
-    st.markdown("#### Drill down: equipment on a trailer")
-    pick = st.selectbox("Trailer", tsummary["trailer"].tolist())
-    detail = work[work.trailer_name == pick].dropna(subset=["equipment_id"]).copy()
-    detail["equipment_id"] = detail["equipment_id"].astype(int)
-    detail["status"] = detail["equipment_id"].map(vstatus)
-    detail["reason"] = detail["equipment_id"].map(lambda e: verdict.get(e, {}).get("reason"))
-    # one row per (equipment, race, slot) so you see where it rode
-    show = (detail[["status", "equipment_id", "serial_number", "equipment_desc",
-                    "eq_length", "eq_width", "race_id", "slot", "trailer_view", "reason"]]
-            .sort_values(["status", "equipment_id", "race_id", "slot"],
-                         key=lambda s: s.map({FAIL: 0, AMBIGUOUS: 1, UNKNOWN: 2, PASS: 3})
-                         if s.name == "status" else s))
-    only_anom = st.checkbox("Show only failed / ambiguous / unknown", value=True)
-    if only_anom:
-        show = show[show.status.isin([FAIL, AMBIGUOUS, UNKNOWN])]
-    st.write(f"**{pick}** — {detail['equipment_id'].nunique()} distinct equipment across "
-             f"{detail['race_id'].nunique()} races.")
-    st.dataframe(show.style.map(tcolor, subset=["status"]),
-                 use_container_width=True, hide_index=True)
-    st.download_button(f"⬇ Download {pick} equipment (CSV)",
-                       show.to_csv(index=False), f"trailer_{pick}_equipment.csv", "text/csv")
-
-# --- All equipment ---
-with tab_all:
-    status_filter = st.multiselect("Filter status", [FAIL, AMBIGUOUS, UNKNOWN, PASS],
-                                   default=[FAIL, AMBIGUOUS, UNKNOWN, PASS])
-    view = table[table.status.isin(status_filter)]
-    def color(v):
-        return f"color: {STATUS_COLOR.get(v, '#000')}; font-weight:600"
-    st.dataframe(view.style.map(color, subset=["status"]),
-                 use_container_width=True, hide_index=True)
-    st.download_button("⬇ Download full results (CSV)",
-                       view.to_csv(index=False), "all_equipment_verdicts_2026.csv", "text/csv")
-
-# --- Slot drill-down ---
-with tab_slot:
-    st.subheader("Inspect a single slot: do the STORED sizes contradict this load sheet?")
-    st.caption("This slot was used, so in reality the equipment fit. If the stored sizes "
-               "here overflow, the stored sizes are wrong (not the load sheet).")
-    c1, c2, c3 = st.columns(3)
-    races = sorted(work["race_id"].unique())
-    race = c1.selectbox("Race", races)
-    trailers = sorted(work[work.race_id == race]["trailer_name"].unique())
-    trailer = c2.selectbox("Trailer", trailers)
-    slots = sorted(work[(work.race_id == race) & (work.trailer_name == trailer)]["slot"].unique())
-    slot = c3.selectbox("Slot", slots)
-
-    sub = work[(work.race_id == race) & (work.trailer_name == trailer) & (work.slot == slot)]
-    sg = slot_geometry(int(slot), geom)
-    items = [Item(int(r.equipment_id), float(r.eq_length), float(r.eq_width),
-                  str(r.equipment_desc)) for _, r in sub.iterrows()
-             if not r.dims_missing and pd.notna(r.eq_length) and r.eq_length > 0
-             and pd.notna(r.eq_width) and r.eq_width > 0]
-    fits, used = _fits_axis(items, sg.length, sg.width, gap) if items else (True, 0.0)
-
-    kind = "dancefloor" if int(slot) in DANCEFLOOR_SLOTS else "general"
-    st.write(f"**Slot {slot}** ({kind}): usable **{sg.length:.0f} × {sg.width:.0f} in** · "
-             f"{len(items)} item(s) with dims · gap {gap} in")
-    if fits:
-        st.markdown(f"### ✅ Stored sizes are CONSISTENT  \n"
-                    f"packed {used:.1f} in ≤ capacity {sg.length:.0f} in — no contradiction.")
-    else:
-        over = used - sg.length
-        st.markdown(f"### ❌ Stored sizes CONTRADICT this load sheet by {over:.1f} in  \n"
-                    f"stored packing needs {used:.1f} in but this slot (which worked) is "
-                    f"{sg.length:.0f} in → at least one stored size here is too big.")
-    # flag any item whose shorter side alone exceeds the slot width
-    wide = [it for it in items if min(it.length, it.width) > sg.width + 1e-9]
-    if wide:
-        st.markdown("⚠️ Too wide for this slot even rotated (stored width must be wrong): "
-                    + ", ".join(f"`{it.label}` ({it.length:.0f}×{it.width:.0f})" for it in wide))
-    show = sub[["equipment_id", "serial_number", "equipment_desc",
-                "eq_length", "eq_width", "eq_height", "dims_missing"]]
-    st.dataframe(show, use_container_width=True, hide_index=True)
 
 st.divider()
-st.caption("Data: Champschedule (load sheet) ⋈ WMS/modx (equipment dims), 2026 season. "
-           "Load sheet is assumed correct; flagged equipment should be physically re-scanned.")
+
+# ------------------------------------------------------------------ floor drill-down (optional)
+with st.expander("Inspect one race · trailer · floor", expanded=False):
+    races = sorted(scoped["race_id"].unique()) if len(scoped) else []
+    if not races:
+        st.write("Nothing in scope.")
+    else:
+        d1, d2, d3 = st.columns(3)
+        race = d1.selectbox("Race id", races, key="drill_race")
+        trailers = sorted(scoped[scoped.race_id == race]["trailer_name"].unique())
+        trailer = d2.selectbox("Trailer", trailers, key="drill_trailer")
+        floor = d3.selectbox("Floor", [FLOOR_DANCE, FLOOR_GENERAL], key="drill_floor")
+        sub = scoped[(scoped.race_id == race) & (scoped.trailer_name == trailer)
+                     & (scoped.floor == floor)]
+        fg = floor_geometry(floor, geom)
+        items = []
+        seen = set()
+        for _, r in sub.iterrows():
+            if r.dims_missing or pd.isna(r.eq_length) or pd.isna(r.eq_width):
+                continue
+            if r.eq_length <= 0 or r.eq_width <= 0:
+                continue
+            eid = int(r.equipment_id)
+            if eid in seen:
+                continue
+            seen.add(eid)
+            items.append(Item(eid, float(r.eq_length), float(r.eq_width),
+                              str(r.equipment_desc)))
+        result = pack_floor(items, fg.length, fg.width, gap) if items else None
+        st.write(f"**{floor}** floor: **{fg.length:.0f} × {fg.width:.0f} in** · "
+                 f"{len(items)} item(s) · gap {gap} in")
+        if not items:
+            st.write("No items with dimensions on this floor.")
+        elif result.fits:
+            st.success(f"Stored sizes pack successfully ({result.detail}).")
+        else:
+            st.error(f"Stored sizes cannot pack — {result.detail}. "
+                     f"Area overflow ≈ {result.area_overflow:.0f} in².")
+        st.dataframe(
+            sub[["equipment_id", "serial_number", "equipment_desc",
+                 "eq_length", "eq_width", "slot", "dims_missing"]],
+            use_container_width=True, hide_index=True,
+        )
+
+st.caption(
+    "Data: Champschedule (load sheet) ⋈ WMS (equipment dims), 2026. "
+    "Season-wide analysis runs for blame isolation; the race/trailer selectors "
+    "scope what you see."
+)

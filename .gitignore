@@ -10,3 +10,6 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Brainstorm / local agent artifacts
+.superpowers/
