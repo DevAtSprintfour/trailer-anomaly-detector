@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 import pandas as pd
 
-from geometry import Item, floor_for_slot, floor_geometry, pack_floor
+from floor_geom import Item, floor_for_slot, floor_geometry, pack_floor
 
 PASS = "PASS"
 FAIL = "FAIL"

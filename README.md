@@ -16,7 +16,8 @@ trailer-anomaly/
 │   ├── trailers_2026.csv     30 trailers + view class
 │   └── slots_2026.csv        slot occupancy (reference)
 ├── app/                   the analyzer
-│   ├── geometry.py           floor dims + 2D packer (rotation, gaps)
+│   ├── floor_geom.py         floor dims + 2D packer (rotation, gaps)
+│   ├── geometry.py           compatibility shim → floor_geom
 │   ├── analysis.py           floor-level engine + blame isolation
 │   ├── test_logic.py         unit tests
 │   └── streamlit_app.py      the UI

@@ -10,4 +10,4 @@
 - trailer-anomaly is a Streamlit + Pandas dimension anomaly detector (not a packing/assignment engine): load sheets are ground truth, and overflow means stored WMS dimensions are wrong.
 - Analysis unit is `(race, trailer, floor)`: dance = slots 1–2 (default 129×98 in), general = slots 3–10 (default 483×98 in).
 - Floor packing uses 2D rectangle packing with per-item 90° rotation and harness gap (default 2 in); blame uses leave-one-out and cross-race isolation into PASS / FAIL / AMBIGUOUS / UNKNOWN.
-- Core modules are `app/geometry.py`, `app/analysis.py`, and `app/streamlit_app.py`; design is locked in `docs/DESIGN.md`; primary data is `data/loadsheet_2026.csv`.
+- Core modules are `app/floor_geom.py`, `app/analysis.py`, and `app/streamlit_app.py`; design is locked in `docs/DESIGN.md`; primary data is `data/loadsheet_2026.csv`.

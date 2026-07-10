@@ -8,7 +8,7 @@ import os
 import pandas as pd
 import streamlit as st
 
-from geometry import (
+from floor_geom import (
     DEFAULT_GEOM, Item, pack_floor, floor_geometry, floor_for_slot,
     FLOOR_DANCE, FLOOR_GENERAL,
 )

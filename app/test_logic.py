@@ -1,6 +1,6 @@
 """Tests for floor-level 2D packing + blame. Run: python test_logic.py"""
 import pandas as pd
-from geometry import floor_geometry, pack_floor, Item, FLOOR_DANCE, FLOOR_GENERAL
+from floor_geom import floor_geometry, pack_floor, Item, FLOOR_DANCE, FLOOR_GENERAL
 from analysis import analyze, PASS, FAIL, AMBIGUOUS, UNKNOWN
 
 
