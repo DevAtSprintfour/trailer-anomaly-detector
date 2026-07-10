@@ -75,11 +75,17 @@ with st.sidebar.expander("Floor dimensions (tunable)", expanded=False):
             st.session_state.pop(k, None)
         st.rerun()
 
-# ------------------------------------------------------------------ filter + analyze
+# ------------------------------------------------------------------ data + season analysis
 work = ls[ls["trailer_view"].isin(sel_views)].copy()
 work["floor"] = work["slot"].map(floor_for_slot)
 
-# Race / trailer selectors (All allowed)
+# Analyze on the view-filtered season (blame needs cross-race); filters only scope the view
+verdict = analyze(work, gap=gap, geom=geom, cross_reference=cross_ref)
+
+eq_meta = (work[["equipment_id", "serial_number", "equipment_desc",
+                 "eq_length", "eq_width"]]
+           .drop_duplicates("equipment_id").set_index("equipment_id"))
+
 race_labels = {}
 for rid, g in work.groupby("race_id"):
     dates = g["race_date"].dropna().unique()
@@ -88,34 +94,6 @@ for rid, g in work.groupby("race_id"):
         race_labels[int(rid)] = f"Race {rid} ({d})"
     else:
         race_labels[int(rid)] = f"Race {rid}"
-
-race_options = [ALL] + [race_labels[r] for r in sorted(race_labels)]
-sel_race_label = st.sidebar.selectbox("Race", race_options, index=0)
-if sel_race_label == ALL:
-    race_filter = None
-else:
-    race_filter = next(r for r, lab in race_labels.items() if lab == sel_race_label)
-
-trailers_available = work if race_filter is None else work[work.race_id == race_filter]
-trailer_options = [ALL] + sorted(trailers_available["trailer_name"].dropna().unique().tolist())
-sel_trailer = st.sidebar.selectbox("Trailer", trailer_options, index=0)
-
-scoped = work.copy()
-if race_filter is not None:
-    scoped = scoped[scoped.race_id == race_filter]
-if sel_trailer != ALL:
-    scoped = scoped[scoped.trailer_name == sel_trailer]
-
-# Analyze on the view-filtered season (blame needs cross-race), then scope display
-verdict = analyze(work, gap=gap, geom=geom, cross_reference=cross_ref)
-counts = summarize(verdict)
-
-eq_meta = (work[["equipment_id", "serial_number", "equipment_desc",
-                 "eq_length", "eq_width"]]
-           .drop_duplicates("equipment_id").set_index("equipment_id"))
-
-# Equipment that appears in the current race/trailer scope
-scoped_eids = set(scoped["equipment_id"].dropna().astype(int))
 
 
 def status_rank(s):
@@ -158,7 +136,7 @@ def equipment_table(eids):
     )
 
 
-# ------------------------------------------------------------------ header
+# ------------------------------------------------------------------ header + primary filters
 st.title("Trailer Floor Anomaly Detector")
 st.caption(
     "Load sheets are ground truth. Equipment is pooled into **dance floor** "
@@ -166,20 +144,95 @@ st.caption(
     "2D-pack into a floor that worked are flagged for re-scan."
 )
 
-scope_bits = []
-scope_bits.append("all races" if race_filter is None else race_labels[race_filter])
-scope_bits.append("all trailers" if sel_trailer == ALL else sel_trailer)
-st.info(f"Viewing: **{' · '.join(scope_bits)}**")
+st.subheader("Filter")
+st.caption(
+    "Leave either on **All** to broaden the view: one race + All trailers, "
+    "All races + one trailer, or both set for a single load."
+)
+f1, f2 = st.columns(2)
+race_options = [ALL] + [race_labels[r] for r in sorted(race_labels)]
+with f1:
+    sel_race_label = st.selectbox("Race", race_options, index=0, key="filter_race")
+if sel_race_label == ALL:
+    race_filter = None
+else:
+    race_filter = next(r for r, lab in race_labels.items() if lab == sel_race_label)
+
+trailers_available = work if race_filter is None else work[work.race_id == race_filter]
+trailer_options = [ALL] + sorted(trailers_available["trailer_name"].dropna().unique().tolist())
+with f2:
+    # Reset trailer to All if the previous pick isn't in this race's list
+    if "filter_trailer" in st.session_state and st.session_state["filter_trailer"] not in trailer_options:
+        st.session_state["filter_trailer"] = ALL
+    sel_trailer = st.selectbox("Trailer", trailer_options, index=0, key="filter_trailer")
+
+scoped = work.copy()
+if race_filter is not None:
+    scoped = scoped[scoped.race_id == race_filter]
+if sel_trailer != ALL:
+    scoped = scoped[scoped.trailer_name == sel_trailer]
+
+scoped_eids = set(scoped["equipment_id"].dropna().astype(int))
+
+if race_filter is None and sel_trailer == ALL:
+    scope_msg = "All races · all trailers"
+elif race_filter is not None and sel_trailer == ALL:
+    scope_msg = f"{race_labels[race_filter]} · all trailers in this race"
+elif race_filter is None and sel_trailer != ALL:
+    scope_msg = f"All races · trailer {sel_trailer}"
+else:
+    scope_msg = f"{race_labels[race_filter]} · trailer {sel_trailer}"
+st.info(f"Viewing: **{scope_msg}**  \n({len(scoped)} load-sheet rows · "
+        f"{scoped['race_id'].nunique()} race(s) · "
+        f"{scoped['trailer_name'].nunique()} trailer(s))")
 
 k1, k2, k3, k4, k5 = st.columns(5)
-# KPIs for equipment in scope
 scoped_verdicts = {e: verdict[e] for e in scoped_eids if e in verdict}
-scoped_counts = summarize(scoped_verdicts) if scoped_verdicts else {PASS: 0, FAIL: 0, AMBIGUOUS: 0, UNKNOWN: 0}
+scoped_counts = summarize(scoped_verdicts) if scoped_verdicts else {
+    PASS: 0, FAIL: 0, AMBIGUOUS: 0, UNKNOWN: 0,
+}
 k1.metric("Equipment in scope", len(scoped_verdicts))
 k2.metric("Consistent", scoped_counts[PASS])
 k3.metric("Stored dim wrong", scoped_counts[FAIL])
 k4.metric("Ambiguous", scoped_counts[AMBIGUOUS])
 k5.metric("No stored dims", scoped_counts[UNKNOWN])
+
+# When one side is All, show a breakdown so you can pick the other filter
+if race_filter is not None and sel_trailer == ALL:
+    st.markdown("#### Trailers in this race")
+    st.caption("Pick a trailer above to narrow to one load, or stay on All to see the whole race.")
+    trows = []
+    for tname, g in scoped.groupby("trailer_name", sort=True):
+        eids = set(g["equipment_id"].dropna().astype(int))
+        statuses = [verdict[e]["status"] for e in eids if e in verdict]
+        trows.append(dict(
+            trailer=tname,
+            equipment=len(eids),
+            fail=sum(1 for s in statuses if s == FAIL),
+            ambiguous=sum(1 for s in statuses if s == AMBIGUOUS),
+            unknown=sum(1 for s in statuses if s == UNKNOWN),
+            consistent=sum(1 for s in statuses if s == PASS),
+        ))
+    if trows:
+        st.dataframe(pd.DataFrame(trows), use_container_width=True, hide_index=True)
+
+elif race_filter is None and sel_trailer != ALL:
+    st.markdown(f"#### Races for trailer {sel_trailer}")
+    st.caption("Pick a race above to narrow to one load, or stay on All to see this trailer across the season.")
+    rrows = []
+    for rid, g in scoped.groupby("race_id", sort=True):
+        eids = set(g["equipment_id"].dropna().astype(int))
+        statuses = [verdict[e]["status"] for e in eids if e in verdict]
+        rrows.append(dict(
+            race=race_labels.get(int(rid), rid),
+            equipment=len(eids),
+            fail=sum(1 for s in statuses if s == FAIL),
+            ambiguous=sum(1 for s in statuses if s == AMBIGUOUS),
+            unknown=sum(1 for s in statuses if s == UNKNOWN),
+            consistent=sum(1 for s in statuses if s == PASS),
+        ))
+    if rrows:
+        st.dataframe(pd.DataFrame(rrows), use_container_width=True, hide_index=True)
 
 st.divider()
 
