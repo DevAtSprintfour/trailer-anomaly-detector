@@ -82,18 +82,47 @@ work["floor"] = work["slot"].map(floor_for_slot)
 # Analyze on the view-filtered season (blame needs cross-race); filters only scope the view
 verdict = analyze(work, gap=gap, geom=geom, cross_reference=cross_ref)
 
+# Per (race, trailer) floor overflow flags for dropdown indicators
+season_floors = build_used_floors(work, geom)
+overflow_pairs = set()  # (race_id, trailer_name)
+overflow_trailers = set()
+overflow_races = set()
+for f in season_floors:
+    if not f.items:
+        continue
+    if not pack_floor(f.items, f.cap_length, f.cap_width, gap).fits:
+        overflow_pairs.add((f.race_id, f.trailer_name))
+        overflow_trailers.add(f.trailer_name)
+        overflow_races.add(f.race_id)
+
 eq_meta = (work[["equipment_id", "serial_number", "equipment_desc",
                  "eq_length", "eq_width"]]
            .drop_duplicates("equipment_id").set_index("equipment_id"))
 
 race_labels = {}
+race_label_to_id = {}
 for rid, g in work.groupby("race_id"):
+    rid = int(rid)
+    names = g["race_name"].dropna().unique() if "race_name" in g.columns else []
+    name = str(names[0]) if len(names) else f"Race {rid}"
     dates = g["race_date"].dropna().unique()
-    if len(dates):
-        d = str(dates[0])[:10]
-        race_labels[int(rid)] = f"Race {rid} ({d})"
+    date = str(dates[0])[:10] if len(dates) else None
+    mark = " ⚠" if rid in overflow_races else ""
+    if date:
+        label = f"{name} ({date}){mark}"
     else:
-        race_labels[int(rid)] = f"Race {rid}"
+        label = f"{name}{mark}"
+    race_labels[rid] = label
+    race_label_to_id[label] = rid
+
+
+def trailer_option_label(tname: str, race_id=None) -> str:
+    """Mark trailers that have a floor overflow in the current race scope."""
+    if race_id is None:
+        has = tname in overflow_trailers
+    else:
+        has = (race_id, tname) in overflow_pairs
+    return f"{tname} ⚠ overflow" if has else tname
 
 
 def status_rank(s):
@@ -147,7 +176,8 @@ st.caption(
 st.subheader("Filter")
 st.caption(
     "Leave either on **All** to broaden the view: one race + All trailers, "
-    "All races + one trailer, or both set for a single load."
+    "All races + one trailer, or both set for a single load. "
+    "⚠ marks races/trailers with a floor overflow."
 )
 f1, f2 = st.columns(2)
 race_options = [ALL] + [race_labels[r] for r in sorted(race_labels)]
@@ -156,15 +186,29 @@ with f1:
 if sel_race_label == ALL:
     race_filter = None
 else:
-    race_filter = next(r for r, lab in race_labels.items() if lab == sel_race_label)
+    race_filter = race_label_to_id[sel_race_label]
 
 trailers_available = work if race_filter is None else work[work.race_id == race_filter]
-trailer_options = [ALL] + sorted(trailers_available["trailer_name"].dropna().unique().tolist())
+trailer_names = sorted(trailers_available["trailer_name"].dropna().unique().tolist())
+
+def _trailer_sort_key(t):
+    has = (t in overflow_trailers) if race_filter is None else ((race_filter, t) in overflow_pairs)
+    return (0 if has else 1, t)
+
+trailer_names = sorted(trailer_names, key=_trailer_sort_key)
+trailer_options = [ALL] + trailer_names
+
 with f2:
-    # Reset trailer to All if the previous pick isn't in this race's list
-    if "filter_trailer" in st.session_state and st.session_state["filter_trailer"] not in trailer_options:
+    prev = st.session_state.get("filter_trailer")
+    if prev is not None and prev not in trailer_options:
         st.session_state["filter_trailer"] = ALL
-    sel_trailer = st.selectbox("Trailer", trailer_options, index=0, key="filter_trailer")
+    sel_trailer = st.selectbox(
+        "Trailer",
+        trailer_options,
+        index=0,
+        key="filter_trailer",
+        format_func=lambda t: ALL if t == ALL else trailer_option_label(t, race_filter),
+    )
 
 scoped = work.copy()
 if race_filter is not None:
@@ -200,13 +244,14 @@ k5.metric("No stored dims", scoped_counts[UNKNOWN])
 # When one side is All, show a breakdown so you can pick the other filter
 if race_filter is not None and sel_trailer == ALL:
     st.markdown("#### Trailers in this race")
-    st.caption("Pick a trailer above to narrow to one load, or stay on All to see the whole race.")
+    st.caption("⚠ = floor overflow on this race. Pick a trailer above to narrow.")
     trows = []
     for tname, g in scoped.groupby("trailer_name", sort=True):
         eids = set(g["equipment_id"].dropna().astype(int))
         statuses = [verdict[e]["status"] for e in eids if e in verdict]
         trows.append(dict(
-            trailer=tname,
+            trailer=trailer_option_label(tname, race_filter),
+            overflow=(race_filter, tname) in overflow_pairs,
             equipment=len(eids),
             fail=sum(1 for s in statuses if s == FAIL),
             ambiguous=sum(1 for s in statuses if s == AMBIGUOUS),
@@ -214,17 +259,20 @@ if race_filter is not None and sel_trailer == ALL:
             consistent=sum(1 for s in statuses if s == PASS),
         ))
     if trows:
-        st.dataframe(pd.DataFrame(trows), use_container_width=True, hide_index=True)
+        tdf = pd.DataFrame(trows).sort_values(["overflow", "trailer"], ascending=[False, True])
+        st.dataframe(tdf.drop(columns=["overflow"]), use_container_width=True, hide_index=True)
 
 elif race_filter is None and sel_trailer != ALL:
     st.markdown(f"#### Races for trailer {sel_trailer}")
-    st.caption("Pick a race above to narrow to one load, or stay on All to see this trailer across the season.")
+    st.caption("⚠ = floor overflow for this trailer on that race. Pick a race above to narrow.")
     rrows = []
     for rid, g in scoped.groupby("race_id", sort=True):
+        rid = int(rid)
         eids = set(g["equipment_id"].dropna().astype(int))
         statuses = [verdict[e]["status"] for e in eids if e in verdict]
         rrows.append(dict(
-            race=race_labels.get(int(rid), rid),
+            race=race_labels.get(rid, rid),
+            overflow=(rid, sel_trailer) in overflow_pairs,
             equipment=len(eids),
             fail=sum(1 for s in statuses if s == FAIL),
             ambiguous=sum(1 for s in statuses if s == AMBIGUOUS),
@@ -232,7 +280,8 @@ elif race_filter is None and sel_trailer != ALL:
             consistent=sum(1 for s in statuses if s == PASS),
         ))
     if rrows:
-        st.dataframe(pd.DataFrame(rrows), use_container_width=True, hide_index=True)
+        rdf = pd.DataFrame(rrows).sort_values(["overflow", "race"], ascending=[False, True])
+        st.dataframe(rdf.drop(columns=["overflow"]), use_container_width=True, hide_index=True)
 
 st.divider()
 
