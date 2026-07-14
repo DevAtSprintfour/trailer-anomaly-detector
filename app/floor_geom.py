@@ -42,6 +42,8 @@ def floor_for_slot(slot: int) -> str:
 
 
 def floor_geometry(floor: str, geom: dict = None) -> FloorGeom:
+    """geom is a full dance+general dict for ONE trailer category — callers
+    resolve which category's geom to pass in (see trailer_categories.py)."""
     g = {**DEFAULT_GEOM, **(geom or {})}
     if floor == FLOOR_DANCE:
         return FloorGeom(g["dancefloor_length"], g["dancefloor_width"], FLOOR_DANCE)

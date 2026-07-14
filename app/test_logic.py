@@ -127,4 +127,12 @@ check("every category has default geom",
       set(DEFAULT_CATEGORY_GEOM.keys()) == {CATEGORY_T_SERIES, CATEGORY_T_SERIES_TOP,
                                             CATEGORY_F_SERIES, CATEGORY_OTHER})
 
+# --- Per-category geometry override ---
+cat_geom = {"T-Series": dict(dancefloor_length=150.0, dancefloor_width=100.0,
+                             general_length=500.0, general_width=100.0)}
+fg = floor_geometry(FLOOR_DANCE, geom=cat_geom.get("T-Series"))
+check("category override changes dance length", fg.length == 150.0)
+fg2 = floor_geometry(FLOOR_DANCE, geom=cat_geom.get("Other"))  # None -> falls back to default
+check("missing category falls back to default", fg2.length == 129.0)
+
 print("\nALL TESTS PASSED")
