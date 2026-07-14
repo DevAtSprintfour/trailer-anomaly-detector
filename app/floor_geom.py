@@ -228,9 +228,3 @@ def pack_floor(items: List[Item], length: float, width: float,
         max(0.0, area_used - area_cap),
         "no feasible 2D packing",
     )
-
-
-# Back-compat aliases used by older imports / tests during transition
-def slot_geometry(slot: int, geom: dict = None) -> FloorGeom:
-    """Deprecated: returns floor geometry for the floor that owns this slot."""
-    return floor_geometry(floor_for_slot(slot), geom)

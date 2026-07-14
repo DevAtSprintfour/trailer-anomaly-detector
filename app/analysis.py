@@ -212,7 +212,3 @@ def summarize(verdict: Dict[int, dict]) -> Dict[str, int]:
     for v in verdict.values():
         counts[v["status"]] += 1
     return counts
-
-
-# Back-compat for anything still importing the old name
-build_used_slots = build_used_floors
