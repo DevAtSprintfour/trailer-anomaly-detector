@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from floor_geom import Item, floor_for_slot, floor_geometry, pack_floor
+from trailer_categories import classify_trailer
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -27,6 +28,7 @@ class UsedFloor:
     race_id: int
     trailer_id: int
     trailer_name: str
+    trailer_category: str
     view: str
     floor: str                 # 'dance' | 'general'
     cap_length: float
@@ -36,14 +38,23 @@ class UsedFloor:
     has_missing: bool = False
 
 
-def build_used_floors(df: pd.DataFrame, geom: dict) -> List[UsedFloor]:
-    """Group load-sheet rows into (race, trailer, floor) bins."""
+def build_used_floors(df: pd.DataFrame, geom: dict,
+                       category_geom: Dict[str, dict] = None) -> List[UsedFloor]:
+    """Group load-sheet rows into (race, trailer, floor) bins.
+
+    geom is the flat legacy fallback (dance/general dict) used when a
+    trailer's category has no entry in category_geom. category_geom maps
+    trailer_category -> per-category dance/general dict.
+    """
+    cat_geom = category_geom or {}
     work = df.copy()
     work["floor"] = work["slot"].map(floor_for_slot)
     keys = ["race_id", "trailer_id", "trailer_name", "trailer_view", "floor"]
     floors: List[UsedFloor] = []
     for (race, tid, tname, view, floor), g in work.groupby(keys, sort=False):
-        fg = floor_geometry(str(floor), geom)
+        category = classify_trailer(str(tname))
+        resolved_geom = cat_geom.get(category, geom)
+        fg = floor_geometry(str(floor), resolved_geom)
         items, missing = [], False
         # One row per equipment_id on this floor (dedupe if multi-slot noise)
         seen = set()
@@ -61,7 +72,7 @@ def build_used_floors(df: pd.DataFrame, geom: dict) -> List[UsedFloor]:
             else:
                 missing = True
         floors.append(UsedFloor(
-            int(race), int(tid), str(tname), str(view), str(floor),
+            int(race), int(tid), str(tname), category, str(view), str(floor),
             fg.length, fg.width, items, len(seen), missing,
         ))
     return floors
@@ -72,9 +83,14 @@ def _floor_fits(items: List[Item], cap_len: float, cap_wid: float, gap: float) -
 
 
 def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
-            cross_reference: bool = True) -> Dict[int, dict]:
-    """Return {equipment_id: verdict dict} using floor-level 2D packing."""
-    floors = build_used_floors(df, geom)
+            cross_reference: bool = True, category_geom: Dict[str, dict] = None,
+            verified: Optional[set] = None) -> Dict[int, dict]:
+    """Return {equipment_id: verdict dict} using floor-level 2D packing.
+
+    verified: equipment_ids the user has manually confirmed correct — excluded
+    from ambiguous-blame candidacy and forced to RESOLVED status.
+    """
+    floors = build_used_floors(df, geom, category_geom)
 
     appears: Dict[int, List[UsedFloor]] = {}
     for f in floors:

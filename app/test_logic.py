@@ -135,4 +135,24 @@ check("category override changes dance length", fg.length == 150.0)
 fg2 = floor_geometry(FLOOR_DANCE, geom=cat_geom.get("Other"))  # None -> falls back to default
 check("missing category falls back to default", fg2.length == 129.0)
 
+# --- build_used_floors carries trailer_category; analyze() takes category_geom ---
+from analysis import build_used_floors
+
+df = mk([row(9, 50, "T-09", "Cup", 5, 1000, 400, 90, desc="a")])
+floors = build_used_floors(df, geom={})
+check("UsedFloor has trailer_category field",
+      hasattr(floors[0], "trailer_category") and floors[0].trailer_category == CATEGORY_T_SERIES)
+
+# category_geom widens T-Series general floor so a normally-fine item still fits,
+# and narrows F-Series so the same shape would fail there (different category = different result)
+category_geom = {
+    CATEGORY_T_SERIES: dict(dancefloor_length=129.0, dancefloor_width=98.0,
+                            general_length=483.0, general_width=98.0),
+    "F-Series": dict(dancefloor_length=129.0, dancefloor_width=40.0,
+                     general_length=483.0, general_width=40.0),
+}
+df2 = mk([row(10, 60, "F-10", "Cup", 5, 1001, 90, 60, desc="b")])  # 60 > 40 width -> should FAIL
+v = analyze(df2, gap=2, geom={}, cross_reference=True, category_geom=category_geom)
+check("F-Series narrow width triggers FAIL via category_geom", v[1001]["status"] == FAIL)
+
 print("\nALL TESTS PASSED")
