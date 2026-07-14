@@ -249,19 +249,27 @@ fig = render_trailer_figure(
 )
 check("render_trailer_figure returns a plotly Figure", isinstance(fig, go.Figure))
 n_rects = sum(1 for s in fig.layout.shapes if s.type == "rect")
-check("figure draws trailer outline + every placed item",
+check("figure draws one trailer outline + every placed item",
       n_rects == 1 + 1 + 2)  # outline + 1 dance + 2 general
 outline = next(s for s in fig.layout.shapes
-               if s.type == "rect" and abs(s.x1 - (dance_fg.length + general_fg.length)) < 0.01)
+               if s.type == "rect" and abs(s.x1 - (dance_fg.length + general_fg.length)) < 0.01
+               and abs(s.y0) < 0.01)
 check("trailer outline spans dance+general length",
       abs(outline.x1 - (dance_fg.length + general_fg.length)) < 0.01)
+# Packer maps length→X: a dance item placement must sit in x < dance.length
+dance_item_shapes = [
+    s for s in fig.layout.shapes
+    if s.type == "rect" and s.fillcolor == "#d7f0dd" and s.x1 <= dance_fg.length + 1
+]
+check("dance item drawn inside dance section (length on X)",
+      len(dance_item_shapes) >= 1)
 labels_blob = " ".join(str(getattr(tr, "text", "")) for tr in fig.data)
 check("figure labels include equipment name and id",
       "CTS1 TB Stack" in labels_blob and "9001" in labels_blob)
 check("figure labels include on-file dimensions",
       "60×38" in labels_blob or "60x38" in labels_blob)
 
-# Overflow case: unique FAIL item should still appear (in red outside floor),
+# Overflow case: unique FAIL item still appears (in red, inside the trailer),
 # while floor-mates pack inside the outline.
 big_general_items = [Item(9004, 500, 90, "oversized"), Item(9005, 40, 30, "ok")]
 placed, overflow, exact = display_pack(
@@ -282,14 +290,38 @@ fig2 = render_trailer_figure(
 )
 check("overflow figure still valid", isinstance(fig2, go.Figure))
 n_rects2 = sum(1 for s in fig2.layout.shapes if s.type == "rect")
-# outline + 1 placed mate + 1 overflow FAIL item
-check("overflow figure draws all equipment including red overflow",
+# one outline + 1 placed mate + 1 overflow FAIL item (all inside same figure)
+check("overflow figure draws all equipment inside one trailer",
       n_rects2 == 1 + 1 + 1)
+red_boxes = [s for s in fig2.layout.shapes if s.type == "rect" and s.fillcolor == "#f9d7d7"]
+check("overflow item is colored red", len(red_boxes) == 1)
+
+# Axis mapping: general items must sit at x >= dance.length
+gen_pass = [
+    s for s in fig2.layout.shapes
+    if s.type == "rect" and s.fillcolor == "#d7f0dd"
+]
+check("general placed item starts at or past dance length",
+      gen_pass and gen_pass[0].x0 >= dance_fg.length - 0.1)
 
 # best-effort: two large items that can't both fit — places one, overflows one
 pair = [Item(9010, 400, 90, "a"), Item(9011, 400, 90, "b")]
 be_placed, be_unplaced = pack_floor_best_effort(pair, general_fg.length, general_fg.width, gap=2)
 check("best_effort places one of two large items", len(be_placed) == 1)
 check("best_effort leaves one of two large items unplaced", len(be_unplaced) == 1)
+
+# F-10 style: two dance items too long for dance (140 > 129) + general packs
+# — all 7 equipment must appear as rects inside one outline.
+f10_dance = [Item(7217, 140, 48, "a"), Item(7218, 140, 48, "b")]
+f10_gen = [
+    Item(7381, 156, 72, "tele"), Item(7220, 140, 48, "m"),
+    Item(7399, 128, 48, "m2"), Item(7014, 115, 45, "gc"), Item(7309, 140, 46, "p"),
+]
+v_f10 = {7217: {"status": "AMBIGUOUS"}, 7218: {"status": "AMBIGUOUS"},
+         7381: {"status": "PASS"}, 7220: {"status": "PASS"}, 7399: {"status": "PASS"},
+         7014: {"status": "PASS"}, 7309: {"status": "PASS"}}
+fig3 = render_trailer_figure(dance_fg, f10_dance, general_fg, f10_gen, v_f10, gap=2)
+n_item_rects = sum(1 for s in fig3.layout.shapes if s.type == "rect") - 1  # minus outline
+check("F-10 style draws all 7 equipment inside one trailer", n_item_rects == 7)
 
 print("\nALL TESTS PASSED")

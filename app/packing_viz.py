@@ -1,10 +1,12 @@
 """Render a trailer's packing as one continuous Plotly strip.
 
-Dance floor (nose) and general floor (rear) are sections of the same trailer
-drawn end-to-end — one outline spanning dance.length + general.length by
-shared width. Every equipment on the trailer is drawn: items that pack go
-inside the outline; overflow items are drawn in red below their floor zone.
-FAIL/AMBIGUOUS items are always colored red (in or out).
+ONE outer trailer rectangle: dance (nose, left) + general (rear, right)
+end-to-end. Packer coordinates are (x along floor WIDTH, y along floor
+LENGTH) — this module maps them onto the strip as (X=length, Y=width).
+
+Every equipment item is drawn inside that one outline. Items that cannot
+pack are jammed into their floor section in red (may visually spill past
+the floor bounds) so there is never a second detached diagram.
 """
 from __future__ import annotations
 
@@ -31,7 +33,6 @@ STATUS_LINE = {
     "UNKNOWN": "#6e7781",
 }
 
-# Overflow / blamed items always render red so problems stand out.
 OVERFLOW_FILL = "#f9d7d7"
 OVERFLOW_LINE = "#cf222e"
 
@@ -43,12 +44,12 @@ def _item_by_id(items: List[Item], eid: int) -> Item | None:
     return None
 
 
-def _is_overflow_status(status: str) -> bool:
-    return status in ("FAIL", "AMBIGUOUS")
+def _is_problem(status: str, is_overflow: bool) -> bool:
+    return is_overflow or status in ("FAIL", "AMBIGUOUS")
 
 
 def _item_colors(status: str, is_overflow: bool) -> Tuple[str, str]:
-    if is_overflow or _is_overflow_status(status):
+    if _is_problem(status, is_overflow):
         return OVERFLOW_FILL, OVERFLOW_LINE
     return STATUS_FILL.get(status, "#e2e2e2"), STATUS_LINE.get(status, "#6e7781")
 
@@ -57,12 +58,7 @@ def display_pack(
     items: List[Item], length: float, width: float, gap: float,
     verdict: Dict[int, dict],
 ) -> Tuple[List[Placement], List[Item], PackResult]:
-    """Pack for visualization: fit everything that can, overflow the rest.
-
-    Prefer excluding uniquely FAIL-blamed items so floor-mates pack cleanly
-    and the blamed piece shows red outside. Falls back to best-effort partial
-    packing so every equipment still gets a drawn box.
-    """
+    """Pack for visualization: fit everything that can, overflow the rest."""
     exact = pack_floor(items, length, width, gap)
     if exact.fits:
         return exact.placements, [], exact
@@ -80,6 +76,38 @@ def display_pack(
 
     placed, unplaced = pack_floor_best_effort(items, length, width, gap)
     return placed, unplaced, exact
+
+
+def _placement_to_strip(p: Placement, x_offset: float) -> Tuple[float, float, float, float]:
+    """Map packer (x=width-axis, y=length-axis) → strip (X=length, Y=width)."""
+    x0 = x_offset + p.y
+    y0 = p.x
+    x1 = x_offset + p.y + p.h
+    y1 = p.x + p.w
+    return x0, y0, x1, y1
+
+
+def _overflow_placement(it: Item, x_offset: float, cursor_along_length: float,
+                        floor_width: float) -> Tuple[Placement, float]:
+    """Fabricate a placement for an unplaced item inside its floor section.
+
+    Prefer orientation that stays within floor width when possible; otherwise
+    use the natural dims (item will visually spill past the outline — still
+    attached to the one trailer, colored red).
+    """
+    # Try shorter side along width first.
+    orientations = [
+        (min(it.length, it.width), max(it.length, it.width)),  # w, h
+        (max(it.length, it.width), min(it.length, it.width)),
+    ]
+    ow, oh = orientations[0]
+    for cand_w, cand_h in orientations:
+        if cand_w <= floor_width + 1e-9:
+            ow, oh = cand_w, cand_h
+            break
+    # Packer Placement: x along width, y along length, w=width-extent, h=length-extent
+    p = Placement(it.equipment_id, x=0.0, y=cursor_along_length, w=ow, h=oh)
+    return p, cursor_along_length + oh + 2.0
 
 
 def _draw_box(
@@ -109,65 +137,48 @@ def _draw_box(
 def _draw_floor_items(
     fig: go.Figure, items: List[Item], placements: List[Placement],
     overflow: List[Item], verdict: Dict[int, dict],
-    x_offset: float, y_bottom: float, floor_length: float,
-) -> float:
-    """Draw placed items inside the floor strip; overflow in red below it.
+    x_offset: float, floor_length: float, floor_width: float,
+) -> Tuple[float, float]:
+    """Draw placed + overflow items inside the trailer strip for one floor.
 
-    Returns the lowest y used (for figure ranging).
+    Returns (min_y, max_y) extents actually drawn (may spill past floor_width).
     """
+    min_y, max_y = 0.0, floor_width
+
     for p in placements:
         eid = p.equipment_id
         status = verdict.get(eid, {}).get("status", "UNKNOWN")
         fill, line = _item_colors(status, is_overflow=False)
         it = _item_by_id(items, eid)
         label = it.label if it else str(eid)
-        file_L = it.length if it else p.w
-        file_W = it.width if it else p.h
-        x0, y0 = x_offset + p.x, y_bottom + p.y
-        x1, y1 = x_offset + p.x + p.w, y_bottom + p.y + p.h
+        file_L = it.length if it else p.h
+        file_W = it.width if it else p.w
+        x0, y0, x1, y1 = _placement_to_strip(p, x_offset)
         _draw_box(
             fig, x0, y0, x1, y1, fill, line, label, eid,
             file_L, file_W, status, p.w, p.h, overflow=False,
         )
+        min_y = min(min_y, y0)
+        max_y = max(max_y, y1)
 
-    if not overflow:
-        return y_bottom
-
-    cursor_x = x_offset
-    cursor_y = y_bottom - 8
-    row_height = 0.0
-    lowest = y_bottom
-    band_right = x_offset + max(floor_length, 40.0)
-
-    fig.add_annotation(
-        x=x_offset, y=cursor_y + 2,
-        text=f"Overflow ({len(overflow)}) — cannot fit",
-        showarrow=False, xanchor="left", yanchor="bottom",
-        font=dict(size=10, color=OVERFLOW_LINE),
-    )
-    cursor_y -= 2
-
+    # Jam overflow items into this floor section (still inside the one trailer).
+    cursor = 0.0
     for it in overflow:
         status = verdict.get(it.equipment_id, {}).get("status", "FAIL")
         fill, line = _item_colors(status, is_overflow=True)
-        # Place with longer side along x so labels stay readable.
-        ow = min(it.length, it.width)
-        oh = max(it.length, it.width)
-        if cursor_x + oh > band_right and cursor_x > x_offset:
-            cursor_x = x_offset
-            cursor_y -= row_height + 4
-            row_height = 0.0
-        x0, y0 = cursor_x, cursor_y - ow
-        x1, y1 = cursor_x + oh, cursor_y
+        p, cursor = _overflow_placement(it, x_offset, cursor, floor_width)
+        x0, y0, x1, y1 = _placement_to_strip(p, x_offset)
+        # Keep the fabricated box rooted in this floor's length span when possible.
+        # If oh > floor_length the box will spill into the neighboring section —
+        # still one trailer, just visually overflowing, which is the point.
         _draw_box(
             fig, x0, y0, x1, y1, fill, line, it.label, it.equipment_id,
-            it.length, it.width, status, oh, ow, overflow=True,
+            it.length, it.width, status, p.w, p.h, overflow=True,
         )
-        cursor_x = x1 + 4
-        row_height = max(row_height, ow)
-        lowest = min(lowest, y0)
+        min_y = min(min_y, y0)
+        max_y = max(max_y, y1)
 
-    return lowest - 2
+    return min_y, max_y
 
 
 def render_trailer_figure(
@@ -178,19 +189,33 @@ def render_trailer_figure(
     dance_result: PackResult = None,
     general_result: PackResult = None,
 ) -> go.Figure:
-    """One continuous trailer strip with every item drawn; overflow in red.
-
-    dance_result / general_result are optional (kept for call-site compat);
-    when omitted, display packing is computed here via display_pack().
-    """
+    """One continuous trailer rectangle; every item drawn inside it."""
     fig = go.Figure()
     total_length = dance_geom.length + general_geom.length
     total_width = max(dance_geom.width, general_geom.width)
-    y_bottom, y_top = 0.0, total_width
 
+    # Single outer trailer outline.
     fig.add_shape(
-        type="rect", x0=0, y0=y_bottom, x1=total_length, y1=y_top,
-        line=dict(color="#666", width=2), fillcolor="#fafafa", layer="below",
+        type="rect", x0=0, y0=0, x1=total_length, y1=total_width,
+        line=dict(color="#888", width=2), fillcolor="#fafafa", layer="below",
+    )
+    # Subtle dance | general divider (same trailer, two sections).
+    fig.add_shape(
+        type="line", x0=dance_geom.length, y0=0,
+        x1=dance_geom.length, y1=total_width,
+        line=dict(color="#bbb", width=1, dash="dot"),
+    )
+    fig.add_annotation(
+        x=dance_geom.length / 2, y=total_width + 2,
+        text=f"dance · {dance_geom.length:.0f}×{dance_geom.width:.0f}",
+        showarrow=False, font=dict(size=10, color="#888"),
+        yanchor="bottom",
+    )
+    fig.add_annotation(
+        x=dance_geom.length + general_geom.length / 2, y=total_width + 2,
+        text=f"general · {general_geom.length:.0f}×{general_geom.width:.0f}",
+        showarrow=False, font=dict(size=10, color="#888"),
+        yanchor="bottom",
     )
 
     dance_placed, dance_overflow, dance_exact = display_pack(
@@ -204,15 +229,14 @@ def render_trailer_figure(
     if general_result is not None:
         general_exact = general_result
 
-    low_d = _draw_floor_items(
+    dmin, dmax = _draw_floor_items(
         fig, dance_items, dance_placed, dance_overflow, verdict,
-        0.0, y_bottom, dance_geom.length,
+        0.0, dance_geom.length, dance_geom.width,
     )
-    low_g = _draw_floor_items(
+    gmin, gmax = _draw_floor_items(
         fig, general_items, general_placed, general_overflow, verdict,
-        dance_geom.length, y_bottom, general_geom.length,
+        dance_geom.length, general_geom.length, general_geom.width,
     )
-    lowest = min(low_d, low_g, y_bottom)
 
     parts = []
     if dance_exact.fits:
@@ -224,16 +248,16 @@ def render_trailer_figure(
     else:
         parts.append(f"general overflow ({len(general_overflow)})")
     all_ok = dance_exact.fits and general_exact.fits
-    caption_y = lowest - 6
     fig.add_annotation(
-        x=0, y=caption_y,
+        x=0, y=min(0.0, dmin, gmin) - 4,
         text=("Packed successfully — " if all_ok else "Overflow — ") + " · ".join(parts),
         showarrow=False, xanchor="left", yanchor="top",
         font=dict(size=11, color="#1a7f37" if all_ok else "#cf222e"),
     )
 
+    y_lo = min(0.0, dmin, gmin) - 16
+    y_hi = max(total_width, dmax, gmax) + 14
     x_lo, x_hi = -8, total_length + 8
-    y_lo, y_hi = caption_y - 12, y_top + 8
     x_range = x_hi - x_lo
     y_range = max(y_hi - y_lo, 1.0)
 
