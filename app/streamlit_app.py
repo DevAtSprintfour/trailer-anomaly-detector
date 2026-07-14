@@ -321,10 +321,11 @@ st.subheader("Trailers")
 st.caption(
     "One row per selected trailer with fail/ambiguous counts up front. Click "
     "**Expand** to see every piece of equipment on that trailer for the "
-    "selected race. The diagram uses the same packer as analysis: items that "
-    "won't pack spill past their floor section (amber=AMBIGUOUS, red=FAIL). "
-    "Dance (warm tint) and general (cool tint) share one trailer outline. "
-    "Check **Verified** or edit L×W inline to reprocess; download WMS "
+    "selected race. The diagram uses the same packer as analysis. Items that "
+    "won't pack are shown in a labeled gutter under their floor (not stacked "
+    "on top of packed tiles); any true overlaps are drawn translucent. Every "
+    "box shows name, ID, and L×W on the tile. Dance (warm) / general (cool) "
+    "share one outline. Check **Verified** or edit L×W inline; download WMS "
     "corrections at the bottom when finished."
 )
 
