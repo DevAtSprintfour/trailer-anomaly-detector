@@ -155,4 +155,30 @@ df2 = mk([row(10, 60, "F-10", "Cup", 5, 1001, 90, 60, desc="b")])  # 60 > 40 wid
 v = analyze(df2, gap=2, geom={}, cross_reference=True, category_geom=category_geom)
 check("F-Series narrow width triggers FAIL via category_geom", v[1001]["status"] == FAIL)
 
+# --- Checklist store (SQLite) ---
+import tempfile
+from checklist_store import ChecklistStore
+
+_tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+store = ChecklistStore(_tmp_db)
+
+check("nothing verified initially", store.get_verified_ids() == set())
+
+store.mark_verified(equipment_id=200, race_id=1, trailer_id=9, floor="general",
+                    note="physically checked, dims correct")
+check("mark_verified persists", 200 in store.get_verified_ids())
+
+store2 = ChecklistStore(_tmp_db)  # reopen same file -> state survives
+check("verification survives reopen", 200 in store2.get_verified_ids())
+
+store2.unmark_verified(200)
+check("unmark_verified removes it", 200 not in store2.get_verified_ids())
+
+store2.mark_verified(equipment_id=201, race_id=2, trailer_id=10, floor="dance", note="")
+records = store2.list_records()
+check("list_records returns entries", any(r["equipment_id"] == 201 for r in records))
+
+import os as _os
+_os.unlink(_tmp_db)
+
 print("\nALL TESTS PASSED")
