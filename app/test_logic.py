@@ -205,4 +205,24 @@ check("verified item (3-way) forced to RESOLVED", v2[310]["status"] == RESOLVED)
 check("remaining floor-mates re-blamed without verified item -> AMBIGUOUS",
       v2[311]["status"] == AMBIGUOUS and v2[312]["status"] == AMBIGUOUS)
 
+# --- Packing diagram SVG renderer ---
+from packing_viz import render_floor_svg
+
+fg = floor_geometry(FLOOR_GENERAL)
+items = [Item(9001, 200, 40, "widget-a"), Item(9002, 200, 40, "widget-b")]
+result = pack_floor(items, fg.length, fg.width, gap=2)
+svg = render_floor_svg(fg, items, result, verdict={
+    9001: {"status": "PASS"}, 9002: {"status": "PASS"},
+})
+check("svg output starts with <svg", svg.strip().startswith("<svg"))
+check("svg contains a rect per placed item", svg.count("<rect") >= len(result.placements))
+check("svg contains item labels", "widget-a" in svg and "widget-b" in svg)
+
+# Overflow case: item too big to fit at all -> renderer should still return
+# valid SVG (e.g. drawing the floor outline + an overflow marker), not crash.
+big_items = [Item(9003, 900, 90, "oversized")]
+big_result = pack_floor(big_items, fg.length, fg.width, gap=2)
+svg2 = render_floor_svg(fg, big_items, big_result, verdict={9003: {"status": "FAIL"}})
+check("overflow svg still valid", svg2.strip().startswith("<svg"))
+
 print("\nALL TESTS PASSED")
