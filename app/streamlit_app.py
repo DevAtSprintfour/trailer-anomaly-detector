@@ -173,6 +173,16 @@ def color_status(v):
     return f"color: {STATUS_COLOR.get(v, '#000')}; font-weight:600"
 
 
+def status_badge(status: str) -> str:
+    """Inline HTML badge matching table STATUS_COLOR."""
+    color = STATUS_COLOR.get(status, "#6e7781")
+    return (
+        f'<span style="color:{color};font-weight:700;padding:0.1rem 0.45rem;'
+        f'border:1px solid {color};border-radius:4px;font-size:0.85em">'
+        f"{status}</span>"
+    )
+
+
 def effective_dims(eid):
     """Return (L, W) after applying any user dimension correction."""
     if eid in dim_overrides:
@@ -391,7 +401,10 @@ for tname in sorted(sel_trailers, key=_trailer_sort_key):
             orig_W = float(meta["eq_width"]) if meta is not None and pd.notna(meta["eq_width"]) else 0.0
             cur_L, cur_W = dim_overrides.get(eid, (orig_L, orig_W))
             desc = meta["equipment_desc"] if meta is not None else eid
-            st.markdown(f"**#{eid}** — {desc} · status `{v['status']}`")
+            st.markdown(
+                f"**#{eid}** — {desc} · {status_badge(v['status'])}",
+                unsafe_allow_html=True,
+            )
 
             c_L, c_W, c_reset = st.columns([1, 1, 1])
             new_L = c_L.number_input(
