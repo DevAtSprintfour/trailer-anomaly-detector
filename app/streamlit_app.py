@@ -254,10 +254,16 @@ elif "filter_races" in st.session_state:
     st.session_state.pop("filter_races", None)
 
 default_race = all_race_ids[0] if all_race_ids else None
-for rid in all_race_ids:
-    if rid in overflow_races:
-        default_race = rid
-        break
+# Prefer Chicago 2026-07-05 (race_id 446) when present in the filtered set.
+DEFAULT_RACE_ID = 446
+if DEFAULT_RACE_ID in all_race_ids:
+    default_race = DEFAULT_RACE_ID
+elif all_race_ids:
+    # Fallback: first race that has a floor overflow badge.
+    for rid in all_race_ids:
+        if rid in overflow_races:
+            default_race = rid
+            break
 
 f1, f2 = st.columns(2)
 with f1:
