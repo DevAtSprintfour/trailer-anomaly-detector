@@ -112,4 +112,19 @@ df = mk([row(8, 9, "T-8", "Cup", 1, 900, 120, 90, desc="wide-but-ok")])
 v = analyze(df, gap=2, geom={}, cross_reference=True)
 check("lone 90-wide on dance floor -> PASS", v[900]["status"] == PASS)
 
+# --- Trailer category classification ---
+from trailer_categories import (
+    classify_trailer, DEFAULT_CATEGORY_GEOM,
+    CATEGORY_T_SERIES, CATEGORY_T_SERIES_TOP, CATEGORY_F_SERIES, CATEGORY_OTHER,
+)
+check("T-02 -> T-Series", classify_trailer("T-02") == CATEGORY_T_SERIES)
+check("T-38 -> T-Series", classify_trailer("T-38") == CATEGORY_T_SERIES)
+check("T-12 Top -> T-Series Top", classify_trailer("T-12 Top") == CATEGORY_T_SERIES_TOP)
+check("F-10 -> F-Series", classify_trailer("F-10") == CATEGORY_F_SERIES)
+check("01- Big -> Other", classify_trailer("01- Big") == CATEGORY_OTHER)
+check("03-Awn -> Other", classify_trailer("03-Awn") == CATEGORY_OTHER)
+check("every category has default geom",
+      set(DEFAULT_CATEGORY_GEOM.keys()) == {CATEGORY_T_SERIES, CATEGORY_T_SERIES_TOP,
+                                            CATEGORY_F_SERIES, CATEGORY_OTHER})
+
 print("\nALL TESTS PASSED")
