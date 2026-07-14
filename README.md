@@ -14,11 +14,14 @@ trailer-anomaly/
 │   ├── loadsheet_2026.csv    5,613 assignments, dims joined
 │   ├── equipment_2026.csv    284 distinct equipment
 │   ├── trailers_2026.csv     30 trailers + view class
-│   └── slots_2026.csv        slot occupancy (reference)
+│   ├── slots_2026.csv        slot occupancy (reference)
+│   └── checklist.db          local SQLite verification state (gitignored)
 ├── app/                   the analyzer
 │   ├── floor_geom.py         floor dims + 2D packer (rotation, gaps)
-│   ├── geometry.py           compatibility shim → floor_geom
 │   ├── analysis.py           floor-level engine + blame isolation
+│   ├── trailer_categories.py trailer name -> category classification + per-category geometry
+│   ├── checklist_store.py    SQLite-backed equipment verification store
+│   ├── packing_viz.py        Plotly packing diagram renderer
 │   ├── test_logic.py         unit tests
 │   └── streamlit_app.py      the UI
 └── docs/DESIGN.md         full design + locked decisions
@@ -33,7 +36,7 @@ trailer-anomaly/
 ```bash
 cd trailer-anomaly
 python3 -m venv .venv && source .venv/bin/activate
-pip install streamlit pandas
+pip install streamlit pandas plotly
 streamlit run app/streamlit_app.py
 ```
 
@@ -41,13 +44,21 @@ Open the local URL Streamlit prints. To run the tests: `python app/test_logic.py
 
 ## How it works
 - **Premise**: load sheets are ground truth. Stored WMS dims are tested against them.
-- **Two floors**: dance (129×98 in) and general (483×98 in), tunable in the sidebar.
-  Items from slots 1–2 pool into dance; slots 3–10 into general — per race + trailer.
+- **Two floors**: dance (129×98 in) and general (483×98 in) by default. Trailers are
+  classified into categories by name pattern (`T-Series`, `T-Series Top`, `F-Series`,
+  `Other` — see `app/trailer_categories.py`), and each category's floor dimensions are
+  independently tunable in the sidebar. Items from slots 1–2 pool into dance; slots
+  3–10 into general — per race + trailer.
 - **Packing**: MaxRects 2D packing with per-item 90° rotation and a harness gap.
-- **Buckets**: `PASS` · `FAIL` (unique blame) · `AMBIGUOUS` · `UNKNOWN`.
+- **Buckets**: `PASS` · `FAIL` (unique blame) · `AMBIGUOUS` · `UNKNOWN` · `RESOLVED`
+  (manually verified — excluded from blame candidacy on the next reprocess).
 - **Blame**: leave-one-out + cross-race isolation when possible.
-- **UI**: pick race (or All) and trailer (or All); see dance vs general fail counts
-  and expandable equipment details.
+- **UI**: multi-select races and trailers (all selected by default); changing the
+  selection **reprocesses** analysis on exactly that subset rather than filtering a
+  season-wide result. Trailer options stay in sync with the race selection. Each
+  selected trailer is a lazily-expandable row showing fail/ambiguous counts; expanding
+  it shows the equipment table and a combined Plotly packing diagram (dance + general
+  floor) per race, plus checkboxes to mark equipment as manually verified.
 
 ## Data sources
 The committed `data/*.csv` were produced from two internal databases:

@@ -205,24 +205,39 @@ check("verified item (3-way) forced to RESOLVED", v2[310]["status"] == RESOLVED)
 check("remaining floor-mates re-blamed without verified item -> AMBIGUOUS",
       v2[311]["status"] == AMBIGUOUS and v2[312]["status"] == AMBIGUOUS)
 
-# --- Packing diagram SVG renderer ---
-from packing_viz import render_floor_svg
+# --- Packing diagram: one combined Plotly figure per trailer (dance + general) ---
+from packing_viz import render_trailer_figure
+import plotly.graph_objects as go
 
-fg = floor_geometry(FLOOR_GENERAL)
-items = [Item(9001, 200, 40, "widget-a"), Item(9002, 200, 40, "widget-b")]
-result = pack_floor(items, fg.length, fg.width, gap=2)
-svg = render_floor_svg(fg, items, result, verdict={
-    9001: {"status": "PASS"}, 9002: {"status": "PASS"},
-})
-check("svg output starts with <svg", svg.strip().startswith("<svg"))
-check("svg contains a rect per placed item", svg.count("<rect") >= len(result.placements))
-check("svg contains item labels", "widget-a" in svg and "widget-b" in svg)
+dance_fg = floor_geometry(FLOOR_DANCE)
+general_fg = floor_geometry(FLOOR_GENERAL)
+dance_items = [Item(9001, 60, 38, "CTS1 TB Stack")]
+dance_result = pack_floor(dance_items, dance_fg.length, dance_fg.width, gap=2)
+general_items = [Item(9002, 200, 40, "widget-a"), Item(9003, 200, 40, "widget-b")]
+general_result = pack_floor(general_items, general_fg.length, general_fg.width, gap=2)
 
-# Overflow case: item too big to fit at all -> renderer should still return
-# valid SVG (e.g. drawing the floor outline + an overflow marker), not crash.
-big_items = [Item(9003, 900, 90, "oversized")]
-big_result = pack_floor(big_items, fg.length, fg.width, gap=2)
-svg2 = render_floor_svg(fg, big_items, big_result, verdict={9003: {"status": "FAIL"}})
-check("overflow svg still valid", svg2.strip().startswith("<svg"))
+fig = render_trailer_figure(
+    dance_fg, dance_items, dance_result,
+    general_fg, general_items, general_result,
+    verdict={9001: {"status": "PASS"}, 9002: {"status": "PASS"}, 9003: {"status": "PASS"}},
+)
+check("render_trailer_figure returns a plotly Figure", isinstance(fig, go.Figure))
+n_rects = sum(1 for s in fig.layout.shapes if s.type == "rect")
+check("figure has a rect per placed item + 2 floor outlines",
+      n_rects == len(dance_result.placements) + len(general_result.placements) + 2)
+labels_text = " ".join(str(t.text) for tr in fig.data for t in [tr] if hasattr(tr, "text"))
+check("figure labels include equipment name and id",
+      "CTS1 TB Stack" in str(fig.data) and "9001" in str(fig.data))
+
+# Overflow case: item too big to fit at all -> renderer should still return a
+# valid figure (drawing the floor outline + an overflow annotation), not crash.
+big_general_items = [Item(9004, 900, 90, "oversized")]
+big_general_result = pack_floor(big_general_items, general_fg.length, general_fg.width, gap=2)
+fig2 = render_trailer_figure(
+    dance_fg, [], pack_floor([], dance_fg.length, dance_fg.width, gap=2),
+    general_fg, big_general_items, big_general_result,
+    verdict={9004: {"status": "FAIL"}},
+)
+check("overflow figure still valid", isinstance(fig2, go.Figure))
 
 print("\nALL TESTS PASSED")

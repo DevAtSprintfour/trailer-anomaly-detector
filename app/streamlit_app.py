@@ -5,6 +5,8 @@ Run from the project root:
     streamlit run app/streamlit_app.py
 """
 import os
+from typing import Dict
+
 import pandas as pd
 import streamlit as st
 
@@ -14,12 +16,17 @@ from floor_geom import (
 )
 from analysis import (
     analyze, summarize, build_used_floors,
-    PASS, FAIL, AMBIGUOUS, UNKNOWN,
+    PASS, FAIL, AMBIGUOUS, UNKNOWN, RESOLVED,
 )
+from trailer_categories import (
+    classify_trailer, DEFAULT_CATEGORY_GEOM, ALL_CATEGORIES,
+)
+from checklist_store import ChecklistStore
+from packing_viz import render_trailer_figure
 
 DATA = os.path.join(os.path.dirname(__file__), "..", "data")
-STATUS_COLOR = {PASS: "#1a7f37", FAIL: "#cf222e", AMBIGUOUS: "#bf8700", UNKNOWN: "#6e7781"}
-ALL = "All"
+STATUS_COLOR = {PASS: "#1a7f37", FAIL: "#cf222e", AMBIGUOUS: "#bf8700",
+                UNKNOWN: "#6e7781", RESOLVED: "#1568a8"}
 
 st.set_page_config(page_title="Trailer Floor Anomaly Detector", layout="wide")
 
@@ -47,6 +54,10 @@ ls = load_data(
     os.path.getmtime(_races_path) if os.path.exists(_races_path) else 0.0,
 )
 
+CHECKLIST_DB = os.path.join(DATA, "checklist.db")
+checklist = ChecklistStore(CHECKLIST_DB)
+verified_ids = checklist.get_verified_ids()
+
 # ------------------------------------------------------------------ sidebar
 st.sidebar.title("Controls")
 st.sidebar.caption("2026 season · load sheet trusted · floor-level 2D packing")
@@ -72,36 +83,47 @@ cross_ref = st.sidebar.toggle(
          "Off: flag the whole overflowing floor group.",
 )
 
-with st.sidebar.expander("Floor dimensions (tunable)", expanded=False):
-    st.caption("Two floors only — dance and general. Slot numbers only classify which floor.")
-    st.markdown("**Dance floor** (slots 1–2)")
-    da, db = st.columns(2)
-    dl = da.number_input("Length (in)", value=float(DEFAULT_GEOM["dancefloor_length"]),
-                         min_value=1.0, step=1.0, key="dl")
-    dw = db.number_input("Width (in)", value=float(DEFAULT_GEOM["dancefloor_width"]),
-                         min_value=1.0, step=1.0, key="dw")
-    st.markdown("**General floor** (slots 3–10)")
-    ga, gb = st.columns(2)
-    gl = ga.number_input("Length (in)", value=float(DEFAULT_GEOM["general_length"]),
-                         min_value=1.0, step=1.0, key="gl")
-    gw = gb.number_input("Width (in)", value=float(DEFAULT_GEOM["general_width"]),
-                         min_value=1.0, step=1.0, key="gw")
-    geom = dict(dancefloor_length=dl, dancefloor_width=dw,
-                general_length=gl, general_width=gw)
-    if st.button("Reset to defaults"):
-        for k in ("dl", "dw", "gl", "gw"):
-            st.session_state.pop(k, None)
+category_geom: dict = {}
+with st.sidebar.expander("Floor dimensions by trailer category (tunable)", expanded=False):
+    st.caption(
+        "Each trailer-name pattern (see trailer_categories.py) gets its own "
+        "dance/general floor size. All categories start at the same default "
+        "and can be tuned independently."
+    )
+    for cat in ALL_CATEGORIES:
+        st.markdown(f"**{cat}**")
+        defaults = DEFAULT_CATEGORY_GEOM[cat]
+        ca, cb = st.columns(2)
+        dl = ca.number_input("Dance length (in)", value=float(defaults["dancefloor_length"]),
+                             min_value=1.0, step=1.0, key=f"dl_{cat}")
+        dw = cb.number_input("Dance width (in)", value=float(defaults["dancefloor_width"]),
+                             min_value=1.0, step=1.0, key=f"dw_{cat}")
+        cc, cd = st.columns(2)
+        gl = cc.number_input("General length (in)", value=float(defaults["general_length"]),
+                             min_value=1.0, step=1.0, key=f"gl_{cat}")
+        gw = cd.number_input("General width (in)", value=float(defaults["general_width"]),
+                             min_value=1.0, step=1.0, key=f"gw_{cat}")
+        category_geom[cat] = dict(dancefloor_length=dl, dancefloor_width=dw,
+                                  general_length=gl, general_width=gw)
+    if st.button("Reset all categories to defaults"):
+        for cat in ALL_CATEGORIES:
+            for prefix in ("dl_", "dw_", "gl_", "gw_"):
+                st.session_state.pop(f"{prefix}{cat}", None)
         st.rerun()
 
-# ------------------------------------------------------------------ data + season analysis
+# geom stays as the flat legacy fallback for any category not in category_geom
+# (shouldn't happen since every ALL_CATEGORIES entry is always populated above,
+# but build_used_floors/analyze still accept a fallback for safety).
+geom = dict(DEFAULT_GEOM)
+
+# ------------------------------------------------------------------ data + season-wide hints
 work = ls[ls["trailer_view"].isin(sel_views)].copy()
 work["floor"] = work["slot"].map(floor_for_slot)
 
-# Analyze on the view-filtered season (blame needs cross-race); filters only scope the view
-verdict = analyze(work, gap=gap, geom=geom, cross_reference=cross_ref)
-
-# Per (race, trailer) floor overflow flags for dropdown indicators
-season_floors = build_used_floors(work, geom)
+# Season-wide overflow hints for dropdown ⚠ badges only — NOT the reprocessing
+# scope. These are computed once over every race/trailer so a badge can say
+# "this trailer has an overflow somewhere" before you even select it.
+season_floors = build_used_floors(work, geom, category_geom)
 overflow_pairs = set()  # (race_id, trailer_name)
 overflow_trailers = set()
 overflow_races = set()
@@ -136,24 +158,21 @@ for rid, g in work.groupby("race_id"):
     race_label_to_id[label] = rid
 
 
-def trailer_option_label(tname: str, race_id=None) -> str:
-    """Mark trailers that have a floor overflow in the current race scope."""
-    if race_id is None:
-        has = tname in overflow_trailers
-    else:
-        has = (race_id, tname) in overflow_pairs
+def trailer_option_label(tname: str) -> str:
+    """Mark trailers that have a floor overflow in ANY race this season."""
+    has = tname in overflow_trailers
     return f"{tname} ⚠ overflow" if has else tname
 
 
 def status_rank(s):
-    return s.map({FAIL: 0, AMBIGUOUS: 1, UNKNOWN: 2, PASS: 3})
+    return s.map({FAIL: 0, AMBIGUOUS: 1, UNKNOWN: 2, RESOLVED: 3, PASS: 4})
 
 
 def color_status(v):
     return f"color: {STATUS_COLOR.get(v, '#000')}; font-weight:600"
 
 
-def equipment_table(eids):
+def equipment_table(eids, verdict):
     rows = []
     for eid in eids:
         if eid not in verdict:
@@ -185,7 +204,7 @@ def equipment_table(eids):
     )
 
 
-# ------------------------------------------------------------------ header + primary filters
+# ------------------------------------------------------------------ header
 st.title("Trailer Floor Anomaly Detector")
 st.caption(
     "Load sheets are ground truth. Equipment is pooled into **dance floor** "
@@ -193,273 +212,224 @@ st.caption(
     "2D-pack into a floor that worked are flagged for re-scan."
 )
 
+# ------------------------------------------------------------------ multi-select filter + reprocess
 st.subheader("Filter")
 st.caption(
-    "Leave either on **All** to broaden the view: one race + All trailers, "
-    "All races + one trailer, or both set for a single load. "
-    "⚠ marks races/trailers with a floor overflow."
+    "Select one or more races and one or more trailers. All races are "
+    "selected by default. The trailer list updates to match your race "
+    "selection, and changing the selection **reprocesses** analysis on "
+    "exactly that subset — it does not just re-filter a season-wide result."
 )
-f1, f2 = st.columns(2)
-race_options = [ALL] + [race_labels[r] for r in sorted(race_labels)]
-with f1:
-    sel_race_label = st.selectbox("Race", race_options, index=0, key="filter_race")
-if sel_race_label == ALL:
-    race_filter = None
-else:
-    race_filter = race_label_to_id[sel_race_label]
 
-trailers_available = work if race_filter is None else work[work.race_id == race_filter]
-trailer_names = sorted(trailers_available["trailer_name"].dropna().unique().tolist())
+all_race_ids = sorted(race_labels)
+f1, f2 = st.columns(2)
+with f1:
+    prev_races = st.session_state.get("filter_races")
+    if prev_races is not None:
+        valid = [r for r in prev_races if r in all_race_ids]
+        if valid != prev_races:
+            st.session_state["filter_races"] = valid or all_race_ids
+    sel_race_ids = st.multiselect(
+        "Races", all_race_ids, default=all_race_ids,
+        format_func=lambda r: race_labels.get(r, str(r)),
+        key="filter_races",
+    )
+if not sel_race_ids:
+    sel_race_ids = all_race_ids  # never allow an empty race scope
+
+trailers_available = work[work.race_id.isin(sel_race_ids)]
+trailer_names_all = sorted(trailers_available["trailer_name"].dropna().unique().tolist())
+
 
 def _trailer_sort_key(t):
-    has = (t in overflow_trailers) if race_filter is None else ((race_filter, t) in overflow_pairs)
+    has = any((rid, t) in overflow_pairs for rid in sel_race_ids)
     return (0 if has else 1, t)
 
-trailer_names = sorted(trailer_names, key=_trailer_sort_key)
-trailer_options = [ALL] + trailer_names
+
+trailer_names_all = sorted(trailer_names_all, key=_trailer_sort_key)
 
 with f2:
-    prev = st.session_state.get("filter_trailer")
-    if prev is not None and prev not in trailer_options:
-        st.session_state["filter_trailer"] = ALL
-    sel_trailer = st.selectbox(
-        "Trailer",
-        trailer_options,
-        index=0,
-        key="filter_trailer",
-        format_func=lambda t: ALL if t == ALL else trailer_option_label(t, race_filter),
+    prev_trailers = st.session_state.get("filter_trailers")
+    if prev_trailers is not None:
+        valid_t = [t for t in prev_trailers if t in trailer_names_all]
+        if valid_t != prev_trailers:
+            st.session_state["filter_trailers"] = valid_t or trailer_names_all
+    sel_trailers = st.multiselect(
+        "Trailers", trailer_names_all, default=trailer_names_all,
+        format_func=trailer_option_label,
+        key="filter_trailers",
     )
+if not sel_trailers:
+    sel_trailers = trailer_names_all  # never allow an empty trailer scope
 
-scoped = work.copy()
-if race_filter is not None:
-    scoped = scoped[scoped.race_id == race_filter]
-if sel_trailer != ALL:
-    scoped = scoped[scoped.trailer_name == sel_trailer]
-
+# --- Reprocess (not just filter) on exactly the selected races + trailers ---
+scoped = work[work.race_id.isin(sel_race_ids) & work.trailer_name.isin(sel_trailers)].copy()
+verdict = analyze(scoped, gap=gap, geom=geom, cross_reference=cross_ref,
+                  category_geom=category_geom, verified=verified_ids)
 scoped_eids = set(scoped["equipment_id"].dropna().astype(int))
 
-if race_filter is None and sel_trailer == ALL:
-    scope_msg = "All races · all trailers"
-elif race_filter is not None and sel_trailer == ALL:
-    scope_msg = f"{race_labels[race_filter]} · all trailers in this race"
-elif race_filter is None and sel_trailer != ALL:
-    scope_msg = f"All races · trailer {sel_trailer}"
-else:
-    scope_msg = f"{race_labels[race_filter]} · trailer {sel_trailer}"
-st.info(f"Viewing: **{scope_msg}**  \n({len(scoped)} load-sheet rows · "
-        f"{scoped['race_id'].nunique()} race(s) · "
-        f"{scoped['trailer_name'].nunique()} trailer(s))")
+st.info(
+    f"Reprocessed: **{len(sel_race_ids)}** race(s) selected of {len(all_race_ids)} · "
+    f"**{len(sel_trailers)}** trailer(s) selected of {len(trailer_names_all)}  \n"
+    f"({len(scoped)} load-sheet rows · {scoped['equipment_id'].nunique()} equipment)"
+)
 
+st.divider()
+
+# ------------------------------------------------------------------ per-trailer detail (lazy)
+st.subheader("Trailers")
+st.caption(
+    "One row per selected trailer with fail/ambiguous counts up front. Click "
+    "**Expand** to render its equipment list and packing diagram per floor "
+    "— split per race when more than one race is selected. Only expanded "
+    "trailers render tables/diagrams, so selecting many races/trailers stays "
+    "fast. Check \"Verified\" on an item once you've physically confirmed "
+    "its stored dimensions are correct; this reprocesses the rest of that "
+    "floor excluding it from blame."
+)
+
+floors_by_trailer: Dict[str, list] = {}
+for f in build_used_floors(scoped, geom, category_geom):
+    floors_by_trailer.setdefault(f.trailer_name, []).append(f)
+
+expanded_trailers = st.session_state.setdefault("expanded_trailers", set())
+
+for tname in sorted(sel_trailers, key=_trailer_sort_key):
+    tfloors = floors_by_trailer.get(tname, [])
+    trailer_eids = set(scoped[scoped.trailer_name == tname]["equipment_id"].dropna().astype(int))
+    t_verdicts = {e: verdict[e] for e in trailer_eids if e in verdict}
+    n_fail = sum(1 for v in t_verdicts.values() if v["status"] == FAIL)
+    n_amb = sum(1 for v in t_verdicts.values() if v["status"] == AMBIGUOUS)
+    category = classify_trailer(tname)
+    is_expanded = tname in expanded_trailers
+
+    row_l, row_r = st.columns([5, 1])
+    row_l.markdown(f"**{tname}** ({category}) — {n_fail} failed, {n_amb} ambiguous")
+    btn_label = "Collapse ▴" if is_expanded else "Expand ▾"
+    if row_r.button(btn_label, key=f"toggle_{tname}"):
+        if is_expanded:
+            expanded_trailers.discard(tname)
+        else:
+            expanded_trailers.add(tname)
+        st.rerun()
+
+    if not is_expanded:
+        st.divider()
+        continue
+
+    with st.container(border=True):
+        if not tfloors:
+            st.write("No load-sheet rows for this trailer in the selected scope.")
+            st.divider()
+            continue
+
+        races_here = sorted({f.race_id for f in tfloors})
+        multi_race = len(races_here) > 1
+
+        trailer_resolved_geom = category_geom.get(category, geom)
+        dance_fg = floor_geometry(FLOOR_DANCE, trailer_resolved_geom)
+        general_fg = floor_geometry(FLOOR_GENERAL, trailer_resolved_geom)
+        # every UsedFloor for this trailer resolved geometry from the same
+        # category, so any floor's trailer_id is the trailer's id
+        trailer_id = tfloors[0].trailer_id
+
+        for rid in races_here:
+            if multi_race:
+                st.markdown(f"##### {race_labels.get(rid, rid)}")
+            race_floors = [f for f in tfloors if f.race_id == rid]
+            dance_f = next((f for f in race_floors if f.floor == FLOOR_DANCE), None)
+            general_f = next((f for f in race_floors if f.floor == FLOOR_GENERAL), None)
+
+            dance_items = dance_f.items if dance_f else []
+            general_items = general_f.items if general_f else []
+            dance_result = pack_floor(dance_items, dance_fg.length, dance_fg.width, gap)
+            general_result = pack_floor(general_items, general_fg.length, general_fg.width, gap)
+
+            ids_here = {it.equipment_id for it in dance_items} | {it.equipment_id for it in general_items}
+            tbl = equipment_table(ids_here, verdict)
+            st.dataframe(
+                tbl.style.map(color_status, subset=["status"]),
+                use_container_width=True, hide_index=True,
+            )
+
+            fig = render_trailer_figure(
+                dance_fg, dance_items, dance_result,
+                general_fg, general_items, general_result,
+                verdict,
+            )
+            st.plotly_chart(fig, use_container_width=True,
+                            key=f"chart_{tname}_{rid}")
+
+            for eid in sorted(ids_here):
+                v = verdict.get(eid)
+                if v is None or v["status"] not in (FAIL, AMBIGUOUS):
+                    continue
+                floor_key = FLOOR_DANCE if any(it.equipment_id == eid for it in dance_items) else FLOOR_GENERAL
+                already = eid in verified_ids
+                c_check, c_note = st.columns([1, 3])
+                checked = c_check.checkbox(
+                    f"Verified #{eid}", value=already,
+                    key=f"verify_{eid}_{rid}_{trailer_id}_{floor_key}",
+                )
+                note = c_note.text_input(
+                    "Note", value="", label_visibility="collapsed",
+                    placeholder="why this is actually correct",
+                    key=f"note_{eid}_{rid}_{trailer_id}_{floor_key}",
+                )
+                if checked and not already:
+                    checklist.mark_verified(eid, rid, trailer_id, floor_key, note)
+                    st.rerun()
+                elif not checked and already:
+                    checklist.unmark_verified(eid, rid, trailer_id, floor_key)
+                    st.rerun()
+    st.divider()
+
+# ------------------------------------------------------------------ summary across selected scope
+st.subheader("Summary across selected scope")
 k1, k2, k3, k4, k5 = st.columns(5)
 scoped_verdicts = {e: verdict[e] for e in scoped_eids if e in verdict}
 scoped_counts = summarize(scoped_verdicts) if scoped_verdicts else {
-    PASS: 0, FAIL: 0, AMBIGUOUS: 0, UNKNOWN: 0,
+    PASS: 0, FAIL: 0, AMBIGUOUS: 0, UNKNOWN: 0, RESOLVED: 0,
 }
 k1.metric("Equipment in scope", len(scoped_verdicts))
 k2.metric("Consistent", scoped_counts[PASS])
 k3.metric("Stored dim wrong", scoped_counts[FAIL])
 k4.metric("Ambiguous", scoped_counts[AMBIGUOUS])
-k5.metric("No stored dims", scoped_counts[UNKNOWN])
+k5.metric("Resolved (verified)", scoped_counts[RESOLVED])
 
-# When one side is All, show a breakdown so you can pick the other filter
-if race_filter is not None and sel_trailer == ALL:
-    st.markdown("#### Trailers in this race")
-    st.caption("⚠ = floor overflow on this race. Pick a trailer above to narrow.")
-    trows = []
-    for tname, g in scoped.groupby("trailer_name", sort=True):
-        eids = set(g["equipment_id"].dropna().astype(int))
-        statuses = [verdict[e]["status"] for e in eids if e in verdict]
-        trows.append(dict(
-            trailer=trailer_option_label(tname, race_filter),
-            overflow=(race_filter, tname) in overflow_pairs,
-            equipment=len(eids),
-            fail=sum(1 for s in statuses if s == FAIL),
-            ambiguous=sum(1 for s in statuses if s == AMBIGUOUS),
-            unknown=sum(1 for s in statuses if s == UNKNOWN),
-            consistent=sum(1 for s in statuses if s == PASS),
-        ))
-    if trows:
-        tdf = pd.DataFrame(trows).sort_values(["overflow", "trailer"], ascending=[False, True])
-        st.dataframe(tdf.drop(columns=["overflow"]), use_container_width=True, hide_index=True)
-
-elif race_filter is None and sel_trailer != ALL:
-    st.markdown(f"#### Races for trailer {sel_trailer}")
-    st.caption("⚠ = floor overflow for this trailer on that race. Pick a race above to narrow.")
-    rrows = []
-    for rid, g in scoped.groupby("race_id", sort=True):
-        rid = int(rid)
-        eids = set(g["equipment_id"].dropna().astype(int))
-        statuses = [verdict[e]["status"] for e in eids if e in verdict]
-        rrows.append(dict(
-            race=race_labels.get(rid, rid),
-            overflow=(rid, sel_trailer) in overflow_pairs,
-            equipment=len(eids),
-            fail=sum(1 for s in statuses if s == FAIL),
-            ambiguous=sum(1 for s in statuses if s == AMBIGUOUS),
-            unknown=sum(1 for s in statuses if s == UNKNOWN),
-            consistent=sum(1 for s in statuses if s == PASS),
-        ))
-    if rrows:
-        rdf = pd.DataFrame(rrows).sort_values(["overflow", "race"], ascending=[False, True])
-        st.dataframe(rdf.drop(columns=["overflow"]), use_container_width=True, hide_index=True)
-
-st.divider()
-
-# ------------------------------------------------------------------ floor cards
-floors = build_used_floors(scoped, geom)
-# Aggregate floor outcomes in scope
-floor_stats = {
-    FLOOR_DANCE: {"bins": 0, "overflow": 0, "fail_eq": set(), "amb_eq": set(), "items": 0},
-    FLOOR_GENERAL: {"bins": 0, "overflow": 0, "fail_eq": set(), "amb_eq": set(), "items": 0},
-}
-
-for f in floors:
-    stt = floor_stats[f.floor]
-    stt["bins"] += 1
-    stt["items"] += len(f.items)
-    result = pack_floor(f.items, f.cap_length, f.cap_width, gap) if f.items else None
-    overflowed = result is not None and not result.fits
-    if overflowed:
-        stt["overflow"] += 1
-    for it in f.items:
-        vs = verdict.get(it.equipment_id, {}).get("status")
-        if vs == FAIL:
-            stt["fail_eq"].add(it.equipment_id)
-        elif vs == AMBIGUOUS:
-            stt["amb_eq"].add(it.equipment_id)
-
-c_dance, c_gen = st.columns(2)
-
-
-def render_floor_card(col, floor_key, title):
-    fg = floor_geometry(floor_key, geom)
-    stt = floor_stats[floor_key]
-    n_fail = len(stt["fail_eq"])
-    n_amb = len(stt["amb_eq"])
-    with col:
-        st.subheader(title)
-        st.caption(f"{fg.length:.0f} × {fg.width:.0f} in · {stt['bins']} load(s) in scope")
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Overflowing loads", stt["overflow"])
-        m2.metric("Failed equipment", n_fail)
-        m3.metric("Ambiguous", n_amb)
-
-        suspect_ids = stt["fail_eq"] | stt["amb_eq"]
-        with st.expander(f"Equipment details ({len(suspect_ids)} suspect)", expanded=n_fail + n_amb > 0):
-            if not suspect_ids:
-                st.write("No failed or ambiguous equipment on this floor in the current scope.")
-            else:
-                tbl = equipment_table(suspect_ids)
-                st.dataframe(
-                    tbl.style.map(color_status, subset=["status"]),
-                    use_container_width=True, hide_index=True,
-                )
-                st.download_button(
-                    f"Download {title} suspects (CSV)",
-                    tbl.to_csv(index=False),
-                    f"{floor_key}_suspects.csv",
-                    "text/csv",
-                    key=f"dl_{floor_key}",
-                )
-
-        with st.expander("All equipment on this floor", expanded=False):
-            all_ids = set()
-            for f in floors:
-                if f.floor == floor_key:
-                    for it in f.items:
-                        all_ids.add(it.equipment_id)
-            # also include missing-dim equipment from scoped rows
-            miss = scoped[(scoped.floor == floor_key) & scoped.dims_missing]
-            for eid in miss["equipment_id"].dropna().astype(int):
-                all_ids.add(eid)
-            if not all_ids:
-                st.write("No equipment on this floor in scope.")
-            else:
-                tbl = equipment_table(all_ids)
-                st.dataframe(
-                    tbl.style.map(color_status, subset=["status"]),
-                    use_container_width=True, hide_index=True,
-                )
-
-
-render_floor_card(c_dance, FLOOR_DANCE, "Dance floor")
-render_floor_card(c_gen, FLOOR_GENERAL, "General floor")
-
-st.divider()
-
-# ------------------------------------------------------------------ good-fail list (scoped)
-st.subheader("Good-fail list — re-scan these")
-fails = equipment_table({e for e in scoped_eids if verdict.get(e, {}).get("status") == FAIL})
-if fails.empty:
-    st.success("No uniquely blamed failures in this scope.")
-else:
+fails = equipment_table({e for e in scoped_eids if verdict.get(e, {}).get("status") == FAIL}, verdict)
+if not fails.empty:
     st.write(f"**{len(fails)}** equipment with stored sizes that contradict a working floor load.")
     st.dataframe(fails.style.map(color_status, subset=["status"]),
                  use_container_width=True, hide_index=True)
     st.download_button("Download good-fail list (CSV)",
                        fails.to_csv(index=False), "good_fail_list_2026.csv", "text/csv")
+else:
+    st.success("No uniquely blamed failures in this scope.")
 
 amb_ids = {e for e in scoped_eids if verdict.get(e, {}).get("status") == AMBIGUOUS}
 if amb_ids:
     with st.expander(f"Ambiguous ({len(amb_ids)}) — scan the group"):
-        amb = equipment_table(amb_ids)
+        amb = equipment_table(amb_ids, verdict)
         st.dataframe(amb.style.map(color_status, subset=["status"]),
                      use_container_width=True, hide_index=True)
 
 unk_ids = {e for e in scoped_eids if verdict.get(e, {}).get("status") == UNKNOWN}
 if unk_ids:
     with st.expander(f"Unknown dims ({len(unk_ids)})"):
-        unk = equipment_table(unk_ids)
+        unk = equipment_table(unk_ids, verdict)
         st.dataframe(unk[["equipment_id", "serial", "description", "reason"]],
                      use_container_width=True, hide_index=True)
 
-st.divider()
-
-# ------------------------------------------------------------------ floor drill-down (optional)
-with st.expander("Inspect one race · trailer · floor", expanded=False):
-    races = sorted(scoped["race_id"].unique()) if len(scoped) else []
-    if not races:
-        st.write("Nothing in scope.")
+with st.expander("All verification history"):
+    records = checklist.list_records()
+    if records:
+        st.dataframe(pd.DataFrame(records), use_container_width=True, hide_index=True)
     else:
-        d1, d2, d3 = st.columns(3)
-        race = d1.selectbox("Race id", races, key="drill_race")
-        trailers = sorted(scoped[scoped.race_id == race]["trailer_name"].unique())
-        trailer = d2.selectbox("Trailer", trailers, key="drill_trailer")
-        floor = d3.selectbox("Floor", [FLOOR_DANCE, FLOOR_GENERAL], key="drill_floor")
-        sub = scoped[(scoped.race_id == race) & (scoped.trailer_name == trailer)
-                     & (scoped.floor == floor)]
-        fg = floor_geometry(floor, geom)
-        items = []
-        seen = set()
-        for _, r in sub.iterrows():
-            if r.dims_missing or pd.isna(r.eq_length) or pd.isna(r.eq_width):
-                continue
-            if r.eq_length <= 0 or r.eq_width <= 0:
-                continue
-            eid = int(r.equipment_id)
-            if eid in seen:
-                continue
-            seen.add(eid)
-            items.append(Item(eid, float(r.eq_length), float(r.eq_width),
-                              str(r.equipment_desc)))
-        result = pack_floor(items, fg.length, fg.width, gap) if items else None
-        st.write(f"**{floor}** floor: **{fg.length:.0f} × {fg.width:.0f} in** · "
-                 f"{len(items)} item(s) · gap {gap} in")
-        if not items:
-            st.write("No items with dimensions on this floor.")
-        elif result.fits:
-            st.success(f"Stored sizes pack successfully ({result.detail}).")
-        else:
-            st.error(f"Stored sizes cannot pack — {result.detail}. "
-                     f"Area overflow ≈ {result.area_overflow:.0f} in².")
-        st.dataframe(
-            sub[["equipment_id", "serial_number", "equipment_desc",
-                 "eq_length", "eq_width", "slot", "dims_missing"]],
-            use_container_width=True, hide_index=True,
-        )
+        st.write("Nothing verified yet.")
 
 st.caption(
     "Data: Champschedule (load sheet) ⋈ WMS (equipment dims), 2026. "
-    "Season-wide analysis runs for blame isolation; the race/trailer selectors "
-    "scope what you see."
+    "Selecting races/trailers reprocesses analysis on exactly that subset — "
+    "it is not a display-only filter."
 )
