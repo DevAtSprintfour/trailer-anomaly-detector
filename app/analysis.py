@@ -21,6 +21,7 @@ PASS = "PASS"
 FAIL = "FAIL"
 AMBIGUOUS = "AMBIGUOUS"
 UNKNOWN = "UNKNOWN"
+RESOLVED = "RESOLVED"  # manually verified by a user despite an anomaly flag
 
 
 @dataclass
@@ -91,6 +92,7 @@ def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
     from ambiguous-blame candidacy and forced to RESOLVED status.
     """
     floors = build_used_floors(df, geom, category_geom)
+    verified = set(verified or ())
 
     appears: Dict[int, List[UsedFloor]] = {}
     for f in floors:
@@ -127,13 +129,19 @@ def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
     for f in floors:
         if len(f.items) == 0:
             continue
-        result = pack_floor(f.items, f.cap_length, f.cap_width, gap)
+        # Verified items are treated as ground truth: exclude them from
+        # blame candidacy so they never re-enter FAIL/AMBIGUOUS below, and
+        # so their floor-mates get correctly re-blamed without them.
+        blameable = [it for it in f.items if it.equipment_id not in verified]
+        if len(blameable) == 0:
+            continue
+        result = pack_floor(blameable, f.cap_length, f.cap_width, gap)
         if result.fits:
             continue
 
         resolvers = []
-        for it in f.items:
-            rest = [x for x in f.items if x.equipment_id != it.equipment_id]
+        for it in blameable:
+            rest = [x for x in blameable if x.equipment_id != it.equipment_id]
             if _floor_fits(rest, f.cap_length, f.cap_width, gap):
                 resolvers.append(it.equipment_id)
 
@@ -141,17 +149,17 @@ def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
         overflow = round(result.area_overflow, 1) if result.area_overflow > 0 else 1.0
         info = dict(
             floor=f.floor, race=f.race_id, trailer=f.trailer_name,
-            overflow=overflow, n_items=len(f.items),
+            overflow=overflow, n_items=len(blameable),
             cap_length=f.cap_length, cap_width=f.cap_width,
             detail=result.detail,
         )
         known_resolvers = [e for e in resolvers if e in known_bad]
 
         if not cross_reference:
-            for it in f.items:
+            for it in blameable:
                 ambiguous.add(it.equipment_id)
-        elif len(f.items) == 1:
-            eid = f.items[0].equipment_id
+        elif len(blameable) == 1:
+            eid = blameable[0].equipment_id
             # alone and doesn't pack → already caught as width, or too long
             if eid not in width_bad:
                 cur = pack_bad.get(eid)
@@ -169,7 +177,7 @@ def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
             if cur is None or overflow > cur["overflow"]:
                 pack_bad[eid] = info
         else:
-            for it in f.items:
+            for it in blameable:
                 ambiguous.add(it.equipment_id)
 
     definite = set(width_bad) | set(pack_bad)
@@ -179,7 +187,13 @@ def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
     for eid in eq_ids:
         eid = int(eid)
         n_floors = len(appears.get(eid, []))
-        if eid in width_bad:
+        if eid in verified:
+            verdict[eid] = dict(
+                status=RESOLVED, unique=False, kind="verified",
+                reason="manually verified by a user as correct despite an anomaly flag",
+                excess_in=0.0, worst_floor=None, floors_used=n_floors,
+            )
+        elif eid in width_bad:
             wb = width_bad[eid]
             floor = wb.get("floor", "floor")
             verdict[eid] = dict(
@@ -224,7 +238,7 @@ def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
 
 
 def summarize(verdict: Dict[int, dict]) -> Dict[str, int]:
-    counts = {PASS: 0, FAIL: 0, AMBIGUOUS: 0, UNKNOWN: 0}
+    counts = {PASS: 0, FAIL: 0, AMBIGUOUS: 0, UNKNOWN: 0, RESOLVED: 0}
     for v in verdict.values():
         counts[v["status"]] += 1
     return counts

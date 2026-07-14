@@ -181,4 +181,28 @@ check("list_records returns entries", any(r["equipment_id"] == 201 for r in reco
 import os as _os
 _os.unlink(_tmp_db)
 
+# --- Verified equipment: excluded from ambiguous blame, forced to RESOLVED ---
+from analysis import RESOLVED
+
+# Symmetric-overflow case (two 400x90 items don't both fit on a 483x98 floor),
+# but now verify item 302. Excluding it from blame leaves only 303, which fits
+# alone -> 303 is fully exonerated (PASS), not just re-blamed.
+df = mk([row(20, 9, "T-20", "Cup", 5, 302, 400, 90, desc="a"),
+         row(20, 9, "T-20", "Cup", 7, 303, 400, 90, desc="b")])
+v = analyze(df, gap=2, geom={}, cross_reference=True, verified={302})
+check("verified item forced to RESOLVED", v[302]["status"] == RESOLVED)
+check("verified item excluded from blame -> mate exonerated PASS",
+      v[303]["status"] == PASS)
+
+# Three-item case: verify one 400x90 item, leaving two 400x90 items that
+# still can't both fit on the 483x98 general floor together -> the remaining
+# pair should still hit the ambiguous/unique-blame path on their own.
+df2 = mk([row(21, 9, "T-21", "Cup", 5, 310, 400, 90, desc="verified-a"),
+          row(21, 9, "T-21", "Cup", 6, 311, 400, 90, desc="b"),
+          row(21, 9, "T-21", "Cup", 7, 312, 400, 90, desc="c")])
+v2 = analyze(df2, gap=2, geom={}, cross_reference=True, verified={310})
+check("verified item (3-way) forced to RESOLVED", v2[310]["status"] == RESOLVED)
+check("remaining floor-mates re-blamed without verified item -> AMBIGUOUS",
+      v2[311]["status"] == AMBIGUOUS and v2[312]["status"] == AMBIGUOUS)
+
 print("\nALL TESTS PASSED")
