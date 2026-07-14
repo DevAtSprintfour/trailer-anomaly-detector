@@ -305,10 +305,11 @@ st.subheader("Trailers")
 st.caption(
     "One row per selected trailer with fail/ambiguous counts up front. Click "
     "**Expand** to see every piece of equipment packed on that trailer for "
-    "the selected race — overflow items are drawn in red below the strip. "
-    "Check **Verified** if stored dims are actually correct, or edit L×W "
-    "inline to correct them (reprocesses immediately). Download the WMS "
-    "correction list at the bottom when finished."
+    "the selected race. Boxes match table status (FAIL red, AMBIGUOUS amber). "
+    "If a floor's stored dims won't pack, those items are jammed into their "
+    "section so they're still visible. Check **Verified** if stored dims are "
+    "actually correct, or edit L×W inline (reprocesses immediately). Download "
+    "the WMS correction list at the bottom when finished."
 )
 
 floors_by_trailer: Dict[str, list] = {}

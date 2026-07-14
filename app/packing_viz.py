@@ -44,21 +44,25 @@ def _item_by_id(items: List[Item], eid: int) -> Item | None:
     return None
 
 
-def _is_problem(status: str, is_overflow: bool) -> bool:
-    return is_overflow or status in ("FAIL", "AMBIGUOUS")
-
-
 def _item_colors(status: str, is_overflow: bool) -> Tuple[str, str]:
-    if _is_problem(status, is_overflow):
+    # Color by analysis verdict so the diagram matches the table.
+    # Unplaced items that still somehow lack a verdict get FAIL red.
+    if status in STATUS_FILL:
+        return STATUS_FILL[status], STATUS_LINE[status]
+    if is_overflow:
         return OVERFLOW_FILL, OVERFLOW_LINE
-    return STATUS_FILL.get(status, "#e2e2e2"), STATUS_LINE.get(status, "#6e7781")
+    return "#e2e2e2", "#6e7781"
 
 
 def display_pack(
     items: List[Item], length: float, width: float, gap: float,
     verdict: Dict[int, dict],
 ) -> Tuple[List[Placement], List[Item], PackResult]:
-    """Pack for visualization: fit everything that can, overflow the rest."""
+    """Pack for visualization: fit everything that can; return unplaced as overflow.
+
+    'Overflow' here is a packing outcome (won't fit), not a table status.
+    Unplaced items keep their analysis verdict (FAIL / AMBIGUOUS / …).
+    """
     exact = pack_floor(items, length, width, gap)
     if exact.fits:
         return exact.placements, [], exact
@@ -113,22 +117,22 @@ def _overflow_placement(it: Item, x_offset: float, cursor_along_length: float,
 def _draw_box(
     fig: go.Figure, x0: float, y0: float, x1: float, y1: float,
     fill: str, line: str, label: str, eid: int, file_L: float, file_W: float,
-    status: str, placed_w: float, placed_h: float, overflow: bool,
+    status: str, placed_w: float, placed_h: float, wont_pack: bool,
 ) -> None:
     fig.add_shape(
         type="rect", x0=x0, y0=y0, x1=x1, y1=y1,
         line=dict(color=line, width=1.5), fillcolor=fill,
     )
-    tag = "OVERFLOW" if overflow else status
+    pack_note = " · stored dims won't pack into this floor" if wont_pack else ""
     fig.add_trace(go.Scatter(
         x=[(x0 + x1) / 2], y=[(y0 + y1) / 2],
         mode="text",
         text=[f"{label}<br>#{eid}<br>{file_L:.0f}×{file_W:.0f}"],
         textfont=dict(size=9, color="#1a1a1a"),
         hovertext=[
-            f"{label} (#{eid}) — {tag}<br>"
+            f"{label} (#{eid}) — {status}{pack_note}<br>"
             f"on file: {file_L:.0f}×{file_W:.0f} in<br>"
-            f"placed: {placed_w:.0f}×{placed_h:.0f} in"
+            f"drawn: {placed_w:.0f}×{placed_h:.0f} in"
         ],
         hoverinfo="text", showlegend=False,
     ))
@@ -156,24 +160,23 @@ def _draw_floor_items(
         x0, y0, x1, y1 = _placement_to_strip(p, x_offset)
         _draw_box(
             fig, x0, y0, x1, y1, fill, line, label, eid,
-            file_L, file_W, status, p.w, p.h, overflow=False,
+            file_L, file_W, status, p.w, p.h, wont_pack=False,
         )
         min_y = min(min_y, y0)
         max_y = max(max_y, y1)
 
-    # Jam overflow items into this floor section (still inside the one trailer).
+    # Jam unplaced items into this floor section (still inside the one trailer).
     cursor = 0.0
     for it in overflow:
         status = verdict.get(it.equipment_id, {}).get("status", "FAIL")
         fill, line = _item_colors(status, is_overflow=True)
         p, cursor = _overflow_placement(it, x_offset, cursor, floor_width)
         x0, y0, x1, y1 = _placement_to_strip(p, x_offset)
-        # Keep the fabricated box rooted in this floor's length span when possible.
-        # If oh > floor_length the box will spill into the neighboring section —
-        # still one trailer, just visually overflowing, which is the point.
+        # If oh > floor_length the box may spill into the neighboring section —
+        # still one trailer; that spill is the visual signal they don't fit.
         _draw_box(
             fig, x0, y0, x1, y1, fill, line, it.label, it.equipment_id,
-            it.length, it.width, status, p.w, p.h, overflow=True,
+            it.length, it.width, status, p.w, p.h, wont_pack=True,
         )
         min_y = min(min_y, y0)
         max_y = max(max_y, y1)
@@ -238,19 +241,27 @@ def render_trailer_figure(
         dance_geom.length, general_geom.length, general_geom.width,
     )
 
-    parts = []
-    if dance_exact.fits:
-        parts.append("dance OK")
-    else:
-        parts.append(f"dance overflow ({len(dance_overflow)})")
-    if general_exact.fits:
-        parts.append("general OK")
-    else:
-        parts.append(f"general overflow ({len(general_overflow)})")
+    def _floor_caption(name: str, exact: PackResult, unplaced: List[Item]) -> str:
+        if exact.fits:
+            return f"{name} packs OK"
+        # Summarize by verdict so caption matches the table, not a fake "OVERFLOW" status.
+        counts: Dict[str, int] = {}
+        for it in unplaced:
+            st = verdict.get(it.equipment_id, {}).get("status", "unplaced")
+            counts[st] = counts.get(st, 0) + 1
+        if counts:
+            detail = ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
+            return f"{name} won't pack ({detail})"
+        return f"{name} won't pack"
+
+    parts = [
+        _floor_caption("dance", dance_exact, dance_overflow),
+        _floor_caption("general", general_exact, general_overflow),
+    ]
     all_ok = dance_exact.fits and general_exact.fits
     fig.add_annotation(
         x=0, y=min(0.0, dmin, gmin) - 4,
-        text=("Packed successfully — " if all_ok else "Overflow — ") + " · ".join(parts),
+        text=("Packed successfully — " if all_ok else "") + " · ".join(parts),
         showarrow=False, xanchor="left", yanchor="top",
         font=dict(size=11, color="#1a7f37" if all_ok else "#cf222e"),
     )

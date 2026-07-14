@@ -294,7 +294,7 @@ n_rects2 = sum(1 for s in fig2.layout.shapes if s.type == "rect")
 check("overflow figure draws all equipment inside one trailer",
       n_rects2 == 1 + 1 + 1)
 red_boxes = [s for s in fig2.layout.shapes if s.type == "rect" and s.fillcolor == "#f9d7d7"]
-check("overflow item is colored red", len(red_boxes) == 1)
+check("FAIL overflow item is colored red", len(red_boxes) == 1)
 
 # Axis mapping: general items must sit at x >= dance.length
 gen_pass = [
