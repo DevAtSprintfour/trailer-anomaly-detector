@@ -1,13 +1,10 @@
 """Render a trailer's packing as one continuous Plotly strip.
 
 ONE outer trailer rectangle: dance (nose, left) + general (rear, right).
-Packer coordinates are (x along floor WIDTH, y along floor LENGTH) — mapped
-onto the strip as (X=length, Y=width).
-
-Display packing uses the SAME pack_floor / pack_floor_best_effort logic as
-analysis. Unplaced items go in a gutter under their floor section so they
-never cover packed tiles. Any remaining overlaps use translucent fills.
-Every box has name / id / dims printed on it (no hover required).
+Every equipment box is drawn ON that floor — packed items at packer
+positions, won't-pack items rooted at their floor nose. Overlaps stay on
+the floor and are shown with translucent fill + diagonal hatch. Name / ID /
+dims are printed on every box (no hover required).
 """
 from __future__ import annotations
 
@@ -40,8 +37,7 @@ OVERFLOW_LINE = "#cf222e"
 DANCE_FILL = "#fff6e8"
 GENERAL_FILL = "#f0f4f8"
 
-_GUTTER_GAP = 10.0  # in, between trailer bottom and first overflow row
-_BOX_GAP = 4.0
+_BOX_GAP = 2.0
 
 
 def _item_by_id(items: List[Item], eid: int) -> Item | None:
@@ -101,7 +97,6 @@ def _placement_to_strip(p: Placement, x_offset: float) -> Tuple[float, float, fl
 
 
 def _orient_for_display(it: Item, floor_width: float, floor_length: float) -> Tuple[float, float]:
-    """Orientation preference matching the packer (fit width first, then length)."""
     orientations = [
         (min(it.length, it.width), max(it.length, it.width)),
         (max(it.length, it.width), min(it.length, it.width)),
@@ -127,43 +122,31 @@ def _rects_overlap(a: Tuple[float, float, float, float],
             and ay0 < by1 - pad and ay1 > by0 + pad)
 
 
-def unplaced_gutter_boxes(
-    unplaced: List[Item], x_offset: float, floor_width: float,
-    floor_length: float, gutter_top: float,
-) -> Tuple[List[Tuple[float, float, float, float, Item]], float]:
-    """Lay out unplaced items in a non-overlapping gutter under their floor.
+def unplaced_placements(
+    unplaced: List[Item], floor_width: float, floor_length: float,
+    gap: float = 2.0,
+) -> List[Placement]:
+    """Root won't-pack items at the floor nose, stacked along width.
 
-    Returns (list of (x0,y0,x1,y1,item), lowest_y_used).
-    Stacks left-to-right under the floor's length span; wraps to a new row
-    downward when the next item would exceed that span.
+    Stay on the trailer floor (may overlap packed tiles and/or each other —
+    overlaps are drawn with hatch). Spilling past the floor's length into
+    the neighboring section is fine: still inside the one trailer strip.
     """
-    boxes: List[Tuple[float, float, float, float, Item]] = []
-    cursor_x = x_offset
-    row_top = gutter_top
-    row_height = 0.0
-    band_right = x_offset + max(floor_length, 40.0)
-    lowest = gutter_top
-
+    out: List[Placement] = []
+    cursor_w = 0.0
     for it in unplaced:
         ow, oh = _orient_for_display(it, floor_width, floor_length)
-        # oh along strip-X (length), ow along strip-Y (width).
-        if cursor_x > x_offset and cursor_x + oh > band_right + 1e-9:
-            cursor_x = x_offset
-            row_top -= row_height + _BOX_GAP
-            row_height = 0.0
-        x0, y1 = cursor_x, row_top
-        x1, y0 = cursor_x + oh, row_top - ow
-        boxes.append((x0, y0, x1, y1, it))
-        cursor_x = x1 + _BOX_GAP
-        row_height = max(row_height, ow)
-        lowest = min(lowest, y0)
-
-    return boxes, lowest
+        # Keep width stack on the floor: wrap within floor_width by overlapping
+        # at x=0 when the next item would leave the floor strip.
+        if cursor_w > 0 and cursor_w + ow > floor_width + 1e-9:
+            cursor_w = 0.0
+        out.append(Placement(it.equipment_id, x=cursor_w, y=0.0, w=ow, h=oh))
+        cursor_w += ow + gap
+    return out
 
 
 def _label_font_size(x0: float, y0: float, x1: float, y1: float) -> int:
     bw, bh = abs(x1 - x0), abs(y1 - y0)
-    # Rough readable size from box area in inches.
     return int(max(8, min(13, min(bw, bh) * 0.18)))
 
 
@@ -177,78 +160,103 @@ def _short_label(label: str, max_chars: int = 18) -> str:
 def _draw_box(
     fig: go.Figure, x0: float, y0: float, x1: float, y1: float,
     fill: str, line: str, label: str, eid: int, file_L: float, file_W: float,
-    status: str, wont_pack: bool, alpha: float = 1.0,
+    status: str, wont_pack: bool, overlapping: bool,
 ) -> None:
-    fill_draw = fill if alpha >= 0.99 else _hex_to_rgba(fill, alpha)
-    fig.add_shape(
-        type="rect", x0=x0, y0=y0, x1=x1, y1=y1,
-        line=dict(color=line, width=2 if alpha < 0.99 else 1.5),
-        fillcolor=fill_draw,
+    """Draw an on-floor box; hatch + translucency when overlapping."""
+    alpha = 0.45 if overlapping else 0.85
+    fill_rgba = _hex_to_rgba(fill, alpha)
+    # Closed polygon so we can use Scatter fillpattern for hatch.
+    xs = [x0, x1, x1, x0, x0]
+    ys = [y0, y0, y1, y1, y0]
+    flags = []
+    if wont_pack:
+        flags.append("won't pack")
+    if overlapping:
+        flags.append("OVERLAP")
+    flag_txt = (" · " + " · ".join(flags)) if flags else ""
+    hover = (
+        f"{label} (#{eid}) — {status}{flag_txt}<br>"
+        f"on file: {file_L:.0f}×{file_W:.0f} in"
     )
-    pack_note = " · won't pack" if wont_pack else ""
-    overlap_note = " · OVERLAP" if alpha < 0.99 else ""
-    text = (
-        f"<b>{_short_label(label)}</b><br>"
-        f"#{eid}<br>"
-        f"{file_L:.0f}×{file_W:.0f}"
+    trace_kwargs = dict(
+        x=xs, y=ys,
+        mode="lines",
+        fill="toself",
+        fillcolor=fill_rgba,
+        line=dict(color=line, width=2.5 if overlapping else 1.5,
+                  dash="dash" if overlapping else "solid"),
+        hovertext=hover,
+        hoverinfo="text",
+        showlegend=False,
     )
+    if overlapping:
+        trace_kwargs["fillpattern"] = dict(
+            shape="/", size=6, solidity=0.4, fgcolor=line, bgcolor=fill_rgba,
+        )
+    fig.add_trace(go.Scatter(**trace_kwargs))
+
     fig.add_annotation(
         x=(x0 + x1) / 2, y=(y0 + y1) / 2,
-        text=text,
+        text=(
+            f"<b>{_short_label(label)}</b><br>"
+            f"#{eid}<br>"
+            f"{file_L:.0f}×{file_W:.0f}"
+        ),
         showarrow=False,
         font=dict(size=_label_font_size(x0, y0, x1, y1), color="#111111"),
-        bgcolor="rgba(255,255,255,0.82)",
+        bgcolor="rgba(255,255,255,0.85)",
         bordercolor=line,
         borderwidth=1,
         borderpad=2,
         align="center",
     )
-    # Invisible marker keeps a hover tooltip with full name/status.
-    fig.add_trace(go.Scatter(
-        x=[(x0 + x1) / 2], y=[(y0 + y1) / 2],
-        mode="markers",
-        marker=dict(size=1, opacity=0),
-        hovertext=[
-            f"{label} (#{eid}) — {status}{pack_note}{overlap_note}<br>"
-            f"on file: {file_L:.0f}×{file_W:.0f} in"
-        ],
-        hoverinfo="text",
-        showlegend=False,
-    ))
 
 
-def _draw_placed(
+def _clamp_to_trailer(
+    x0: float, y0: float, x1: float, y1: float,
+    trailer_length: float, trailer_width: float,
+    fallback_w: float, fallback_h: float,
+) -> Tuple[float, float, float, float]:
+    """Keep the drawn box inside the trailer outline; never outside."""
+    x0 = max(0.0, min(x0, trailer_length))
+    x1 = max(0.0, min(x1, trailer_length))
+    y0 = max(0.0, min(y0, trailer_width))
+    y1 = max(0.0, min(y1, trailer_width))
+    if x1 - x0 < 1e-6:
+        x0 = max(0.0, min(x0, trailer_length - 1e-6))
+        x1 = min(trailer_length, x0 + min(fallback_h, trailer_length))
+    if y1 - y0 < 1e-6:
+        y0 = 0.0
+        y1 = min(fallback_w, trailer_width)
+    return x0, y0, x1, y1
+
+
+def _draw_items_on_floor(
     fig: go.Figure, items: List[Item], placements: List[Placement],
-    verdict: Dict[int, dict], x_offset: float,
+    verdict: Dict[int, dict], x_offset: float, wont_pack: bool,
     occupied: List[Tuple[float, float, float, float]],
-) -> Tuple[float, float]:
-    """Draw packed items; mark translucent if they collide with prior boxes."""
-    min_y, max_y = 0.0, 0.0
-    first = True
+    trailer_length: float, trailer_width: float,
+) -> None:
     for p in placements:
         eid = p.equipment_id
         status = verdict.get(eid, {}).get("status", "UNKNOWN")
-        fill, line = _item_colors(status, is_overflow=False)
+        fill, line = _item_colors(status, is_overflow=wont_pack)
         it = _item_by_id(items, eid)
         label = it.label if it else str(eid)
-        file_L = it.length if it else p.h
-        file_W = it.width if it else p.w
+        file_L = float(it.length) if it else float(p.h)
+        file_W = float(it.width) if it else float(p.w)
         x0, y0, x1, y1 = _placement_to_strip(p, x_offset)
+        x0, y0, x1, y1 = _clamp_to_trailer(
+            x0, y0, x1, y1, trailer_length, trailer_width,
+            fallback_w=float(p.w), fallback_h=float(p.h),
+        )
         rect = (x0, y0, x1, y1)
-        overlaps = any(_rects_overlap(rect, o) for o in occupied)
-        alpha = 0.55 if overlaps else 1.0
+        overlapping = any(_rects_overlap(rect, o) for o in occupied)
         _draw_box(
             fig, x0, y0, x1, y1, fill, line, label, eid,
-            file_L, file_W, status, wont_pack=False, alpha=alpha,
+            file_L, file_W, status, wont_pack=wont_pack, overlapping=overlapping,
         )
         occupied.append(rect)
-        if first:
-            min_y, max_y = y0, y1
-            first = False
-        else:
-            min_y = min(min_y, y0)
-            max_y = max(max_y, y1)
-    return min_y, max_y
 
 
 def render_trailer_figure(
@@ -259,7 +267,7 @@ def render_trailer_figure(
     dance_result: PackResult = None,
     general_result: PackResult = None,
 ) -> go.Figure:
-    """One continuous trailer rectangle; gutter for won't-pack; labels on boxes."""
+    """One continuous trailer rectangle; all equipment on-floor; hatch overlaps."""
     fig = go.Figure()
     total_length = dance_geom.length + general_geom.length
     total_width = max(dance_geom.width, general_geom.width)
@@ -306,73 +314,31 @@ def render_trailer_figure(
     if general_result is not None:
         general_exact = general_result
 
+    dance_overflow_pl = unplaced_placements(
+        dance_unplaced, dance_geom.width, dance_geom.length, gap,
+    )
+    general_overflow_pl = unplaced_placements(
+        general_unplaced, general_geom.width, general_geom.length, gap,
+    )
+
     occupied: List[Tuple[float, float, float, float]] = []
-    extents: List[Tuple[float, float]] = [(0.0, total_width)]
-
-    if dance_placed:
-        extents.append(_draw_placed(
-            fig, dance_items, dance_placed, verdict, 0.0, occupied,
-        ))
-    if general_placed:
-        extents.append(_draw_placed(
-            fig, general_items, general_placed, verdict,
-            dance_geom.length, occupied,
-        ))
-
-    # Unplaced → gutter under each floor (never covers packed tiles).
-    gutter_top = -_GUTTER_GAP
-    lowest = 0.0
-    if dance_unplaced:
-        fig.add_annotation(
-            x=0, y=gutter_top + 2,
-            text="dance — won't pack (shown below floor, not overlapping)",
-            showarrow=False, xanchor="left", yanchor="bottom",
-            font=dict(size=10, color=OVERFLOW_LINE),
-        )
-        boxes, low = unplaced_gutter_boxes(
-            dance_unplaced, 0.0, dance_geom.width, dance_geom.length, gutter_top,
-        )
-        for x0, y0, x1, y1, it in boxes:
-            status = verdict.get(it.equipment_id, {}).get("status", "FAIL")
-            fill, line = _item_colors(status, is_overflow=True)
-            rect = (x0, y0, x1, y1)
-            overlaps = any(_rects_overlap(rect, o) for o in occupied)
-            _draw_box(
-                fig, x0, y0, x1, y1, fill, line, it.label, it.equipment_id,
-                it.length, it.width, status, wont_pack=True,
-                alpha=0.55 if overlaps else 1.0,
-            )
-            occupied.append(rect)
-        lowest = min(lowest, low)
-
-    if general_unplaced:
-        g_top = lowest - _GUTTER_GAP if dance_unplaced else gutter_top
-        fig.add_annotation(
-            x=dance_geom.length, y=g_top + 2,
-            text="general — won't pack (shown below floor, not overlapping)",
-            showarrow=False, xanchor="left", yanchor="bottom",
-            font=dict(size=10, color=OVERFLOW_LINE),
-        )
-        boxes, low = unplaced_gutter_boxes(
-            general_unplaced, dance_geom.length, general_geom.width,
-            general_geom.length, g_top,
-        )
-        for x0, y0, x1, y1, it in boxes:
-            status = verdict.get(it.equipment_id, {}).get("status", "FAIL")
-            fill, line = _item_colors(status, is_overflow=True)
-            rect = (x0, y0, x1, y1)
-            overlaps = any(_rects_overlap(rect, o) for o in occupied)
-            _draw_box(
-                fig, x0, y0, x1, y1, fill, line, it.label, it.equipment_id,
-                it.length, it.width, status, wont_pack=True,
-                alpha=0.55 if overlaps else 1.0,
-            )
-            occupied.append(rect)
-        lowest = min(lowest, low)
-
-    dmin = min(e[0] for e in extents)
-    dmax = max(e[1] for e in extents)
-    dmin = min(dmin, lowest)
+    # Draw packed first, then won't-pack on top so hatched overlaps stay readable.
+    _draw_items_on_floor(
+        fig, dance_items, dance_placed, verdict, 0.0, False,
+        occupied, total_length, total_width,
+    )
+    _draw_items_on_floor(
+        fig, general_items, general_placed, verdict,
+        dance_geom.length, False, occupied, total_length, total_width,
+    )
+    _draw_items_on_floor(
+        fig, dance_items, dance_overflow_pl, verdict, 0.0, True,
+        occupied, total_length, total_width,
+    )
+    _draw_items_on_floor(
+        fig, general_items, general_overflow_pl, verdict,
+        dance_geom.length, True, occupied, total_length, total_width,
+    )
 
     def _floor_caption(name: str, exact: PackResult, unplaced: List[Item]) -> str:
         if exact.fits:
@@ -391,19 +357,24 @@ def render_trailer_figure(
         _floor_caption("general", general_exact, general_unplaced),
     ]
     all_ok = dance_exact.fits and general_exact.fits
+    n_overlap = sum(
+        1 for i in range(len(occupied))
+        for j in range(i + 1, len(occupied))
+        if _rects_overlap(occupied[i], occupied[j])
+    )
+    caption = ("Packed successfully — " if all_ok else "") + " · ".join(parts)
+    if n_overlap:
+        caption += f" · {n_overlap} overlap(s) — hatched / dashed outline"
     fig.add_annotation(
-        x=0, y=dmin - 6,
-        text=("Packed successfully — " if all_ok else "") + " · ".join(parts),
+        x=0, y=-6,
+        text=caption,
         showarrow=False, xanchor="left", yanchor="top",
-        font=dict(size=11, color="#1a7f37" if all_ok else "#cf222e"),
+        font=dict(size=11, color="#1a7f37" if all_ok and not n_overlap else "#cf222e"),
     )
 
-    y_lo = dmin - 18
-    y_hi = max(total_width, dmax) + 14
-    max_x = total_length
-    for x0, y0, x1, y1 in occupied:
-        max_x = max(max_x, x1)
-    x_lo, x_hi = -8, max_x + 8
+    # Frame tightly around the trailer; captions sit just outside.
+    x_lo, x_hi = -8, total_length + 8
+    y_lo, y_hi = -18, total_width + 14
     x_range = x_hi - x_lo
     y_range = max(y_hi - y_lo, 1.0)
 
@@ -416,7 +387,7 @@ def render_trailer_figure(
     margin = 10
     assumed_width = 900
     plot_area = assumed_width - 2 * margin
-    height = max(200, int(plot_area * (y_range / x_range)) + 2 * margin)
+    height = max(180, int(plot_area * (y_range / x_range)) + 2 * margin)
 
     fig.update_layout(
         height=height,

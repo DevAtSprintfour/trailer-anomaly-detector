@@ -231,7 +231,7 @@ v_fixed = analyze(df3, gap=2, geom={}, cross_reference=True,
 check("dim override on oversized -> PASS", v_fixed[320]["status"] == PASS)
 check("mate still PASS after override", v_fixed[321]["status"] == PASS)
 
-# --- Packing diagram: continuous trailer strip; display uses same packer ---
+# --- Packing diagram: continuous trailer strip; on-floor with hatched overlaps ---
 from packing_viz import render_trailer_figure, display_pack, DANCE_FILL, GENERAL_FILL
 from floor_geom import pack_floor_best_effort
 import plotly.graph_objects as go
@@ -239,13 +239,19 @@ import plotly.graph_objects as go
 _BG = {DANCE_FILL, GENERAL_FILL, "rgba(0,0,0,0)"}
 
 
-def _item_rects(fig):
-    return [s for s in fig.layout.shapes
-            if s.type == "rect" and s.fillcolor not in _BG]
+def _item_traces(fig):
+    return [tr for tr in fig.data
+            if getattr(tr, "fill", None) == "toself"]
 
 
 def _ann_blob(fig):
     return " ".join(str(a.text) for a in (fig.layout.annotations or []))
+
+
+def _trace_bbox(tr):
+    xs = list(tr.x)
+    ys = list(tr.y)
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 def _rects_overlap(a, b, pad=0.5):
@@ -257,6 +263,8 @@ def _rects_overlap(a, b, pad=0.5):
 
 dance_fg = floor_geometry(FLOOR_DANCE)
 general_fg = floor_geometry(FLOOR_GENERAL)
+trailer_w = max(dance_fg.width, general_fg.width)
+trailer_l = dance_fg.length + general_fg.length
 dance_items = [Item(9001, 60, 38, "CTS1 TB Stack")]
 general_items = [Item(9002, 200, 40, "widget-a"), Item(9003, 200, 40, "widget-b")]
 
@@ -267,17 +275,17 @@ fig = render_trailer_figure(
     gap=2.0,
 )
 check("render_trailer_figure returns a plotly Figure", isinstance(fig, go.Figure))
-check("figure draws every placed item", len(_item_rects(fig)) == 3)
+check("figure draws every placed item on the floor", len(_item_traces(fig)) == 3)
 outline = next(s for s in fig.layout.shapes
                if s.type == "rect" and s.fillcolor == "rgba(0,0,0,0)")
 check("trailer outline spans dance+general length",
-      abs(outline.x1 - (dance_fg.length + general_fg.length)) < 0.01)
-dance_item_shapes = [
-    s for s in _item_rects(fig)
-    if s.fillcolor == "#d7f0dd" and s.x1 <= dance_fg.length + 1
-]
-check("dance item drawn inside dance section (length on X)",
-      len(dance_item_shapes) >= 1)
+      abs(outline.x1 - trailer_l) < 0.01)
+for tr in _item_traces(fig):
+    x0, y0, x1, y1 = _trace_bbox(tr)
+    check("every placed box stays on the trailer floor (Y)",
+          y0 >= -0.1 and y1 <= trailer_w + 0.1)
+    check("every placed box stays inside the trailer (X)",
+          x0 >= -0.1 and x1 <= trailer_l + 0.1)
 labels = _ann_blob(fig)
 check("figure labels include equipment name and id on boxes",
       "CTS1 TB Stack" in labels and "9001" in labels)
@@ -302,22 +310,24 @@ fig2 = render_trailer_figure(
     gap=2.0,
 )
 check("overflow figure still valid", isinstance(fig2, go.Figure))
-check("overflow figure draws all equipment", len(_item_rects(fig2)) == 2)
-red_boxes = [s for s in _item_rects(fig2) if s.fillcolor == "#f9d7d7"]
-check("FAIL overflow item is colored red", len(red_boxes) == 1)
-# FAIL won't-pack goes in the gutter under the trailer (y < 0), not over packed items.
-check("FAIL unplaced box is in the gutter below the trailer",
-      red_boxes and red_boxes[0].y1 <= 0.1)
-gen_pass = [s for s in _item_rects(fig2) if s.fillcolor == "#d7f0dd"]
-check("general placed item starts at or past dance length",
-      gen_pass and gen_pass[0].x0 >= dance_fg.length - 0.1)
+check("overflow figure draws all equipment on the floor", len(_item_traces(fig2)) == 2)
+for tr in _item_traces(fig2):
+    x0, y0, x1, y1 = _trace_bbox(tr)
+    check("FAIL/PASS boxes stay on trailer floor (Y)",
+          y0 >= -0.1 and y1 <= trailer_w + 0.1)
+    check("FAIL/PASS boxes stay inside the trailer (X)",
+          x0 >= -0.1 and x1 <= trailer_l + 0.1)
+# Oversized FAIL should hatch when it overlaps the PASS mate
+hatched = [tr for tr in _item_traces(fig2)
+           if getattr(tr, "fillpattern", None) and tr.fillpattern.shape]
+check("overlapping won't-pack box uses hatch pattern", len(hatched) >= 1)
 
 pair = [Item(9010, 400, 90, "a"), Item(9011, 400, 90, "b")]
 be_placed, be_unplaced = pack_floor_best_effort(pair, general_fg.length, general_fg.width, gap=2)
 check("best_effort places one of two large items", len(be_placed) == 1)
 check("best_effort leaves one of two large items unplaced", len(be_unplaced) == 1)
 
-# F-10: two dance AMBIGUOUS items in gutter; no overlap with packed general.
+# F-10: both AMBIGUOUS on-floor; may overlap packed tiles — hatch, no gutter.
 f10_dance = [Item(7217, 140, 48, "Monster 145"), Item(7218, 140, 48, "Monster 146")]
 f10_gen = [
     Item(7381, 156, 72, "tele"), Item(7220, 140, 48, "m"),
@@ -327,28 +337,21 @@ v_f10 = {7217: {"status": "AMBIGUOUS"}, 7218: {"status": "AMBIGUOUS"},
          7381: {"status": "PASS"}, 7220: {"status": "PASS"}, 7399: {"status": "PASS"},
          7014: {"status": "PASS"}, 7309: {"status": "PASS"}}
 fig3 = render_trailer_figure(dance_fg, f10_dance, general_fg, f10_gen, v_f10, gap=2)
-check("F-10 style draws all 7 equipment", len(_item_rects(fig3)) == 7)
-amb_boxes = [s for s in _item_rects(fig3) if s.fillcolor == "#f7e6b8"]
-pass_boxes = [s for s in _item_rects(fig3) if s.fillcolor == "#d7f0dd"]
-check("F-10 style draws both AMBIGUOUS items as amber boxes", len(amb_boxes) == 2)
-check("AMBIGUOUS boxes sit in gutter below trailer (no cover of packed tiles)",
-      all(s.y1 <= 0.1 for s in amb_boxes))
-amb_pass_overlap = any(
-    _rects_overlap((a.x0, a.y0, a.x1, a.y1), (p.x0, p.y0, p.x1, p.y1))
-    for a in amb_boxes for p in pass_boxes
-)
-check("AMBIGUOUS gutter boxes do not overlap packed PASS boxes", not amb_pass_overlap)
-amb_self_overlap = any(
-    _rects_overlap((amb_boxes[i].x0, amb_boxes[i].y0, amb_boxes[i].x1, amb_boxes[i].y1),
-                   (amb_boxes[j].x0, amb_boxes[j].y0, amb_boxes[j].x1, amb_boxes[j].y1))
-    for i in range(len(amb_boxes)) for j in range(i + 1, len(amb_boxes))
-)
-check("AMBIGUOUS gutter boxes do not overlap each other", not amb_self_overlap)
+check("F-10 style draws all 7 equipment on the floor", len(_item_traces(fig3)) == 7)
+for tr in _item_traces(fig3):
+    x0, y0, x1, y1 = _trace_bbox(tr)
+    check("F-10 boxes stay on trailer floor (Y)",
+          y0 >= -0.1 and y1 <= trailer_w + 0.1)
+    check("F-10 boxes stay inside the trailer (X)",
+          x0 >= -0.1 and x1 <= trailer_l + 0.1)
+hatched3 = [tr for tr in _item_traces(fig3)
+            if getattr(tr, "fillpattern", None) and tr.fillpattern.shape]
+check("F-10 won't-pack overlaps are hatched", len(hatched3) >= 1)
 labels3 = _ann_blob(fig3)
 check("F-10 box labels include equipment names without hover",
       "Monster 145" in labels3 and "Monster 146" in labels3)
 
-# T-07: each alone too long for dance — exact pack places nothing; gutter shows both.
+# T-07: both AMBIGUOUS on-floor at dance nose.
 t07_dance = [Item(7145, 134, 60, "88 pit"), Item(7066, 135, 37, "24 Utility")]
 v_t07 = {7145: {"status": "AMBIGUOUS"}, 7066: {"status": "AMBIGUOUS"}}
 placed_t, unpl_t, exact_t = display_pack(
@@ -358,9 +361,13 @@ check("T-07 dance exact pack fails", not exact_t.fits)
 check("T-07 dance display places nothing inside (same as packer)",
       placed_t == [] and {i.equipment_id for i in unpl_t} == {7145, 7066})
 fig4 = render_trailer_figure(dance_fg, t07_dance, general_fg, [], v_t07, gap=2)
-amb4 = [s for s in _item_rects(fig4) if s.fillcolor == "#f7e6b8"]
-check("T-07 draws both AMBIGUOUS in the gutter",
-      len(amb4) == 2 and all(s.y1 <= 0.1 for s in amb4))
+check("T-07 draws both AMBIGUOUS on the floor", len(_item_traces(fig4)) == 2)
+for tr in _item_traces(fig4):
+    x0, y0, x1, y1 = _trace_bbox(tr)
+    check("T-07 boxes stay on trailer floor (Y)",
+          y0 >= -0.1 and y1 <= trailer_w + 0.1)
+    check("T-07 boxes stay inside the trailer (X)",
+          x0 >= -0.1 and x1 <= trailer_l + 0.1)
 labels4 = _ann_blob(fig4)
 check("T-07 box labels show names and dims on the boxes",
       "88 pit" in labels4 and "24 Utility" in labels4

@@ -4,6 +4,9 @@
 - Streamlit UI exposes a single-race selectbox plus multi-select trailers (trailer options re-derived from the selected race) so analysis can be reprocessed for that exact subset.
 - Prefer a simplified UI centered on two floor categories with fail/ambiguous counts and equipment drill-down, not slot-centric tabs or tables.
 - When design options are clear, prefer agentic decisions over long option menus; the user often locks the recommended option quickly.
+- Expanded packing viz must be one continuous trailer rectangle with dance (nose) and general (rear) sections inside — not two separate floor diagrams.
+- Diagram labels must match table analysis statuses (FAIL/AMBIGUOUS), not a separate "OVERFLOW" vocabulary; pack failures are those same blame rows.
+- Display packing must use the same `pack_floor` / best-effort placements as analysis — never invent alternate layouts that make non-fitting items look packed.
 
 ## Learned Workspace Facts
 
@@ -14,4 +17,4 @@
 - Trailer categories are name-pattern based (T-Series, T-Series Top, F-Series, Other) via `app/trailer_categories.py`; each category has independently tunable dance/general floor dimensions in the sidebar, all defaulting to the original global values.
 - Race selection is a single `st.selectbox` (exactly one race); trailer selection remains multi-select and triggers full reprocessing (`analyze()` re-run on exactly that race + trailer subset). Trailer options are re-derived from the race selection to keep them in sync.
 - Verified/resolved equipment is tracked in `data/checklist.db` (SQLite, `app/checklist_store.py`) and excluded from blame candidacy in `analyze()`, forcing a `RESOLVED` status distinct from `PASS`. Dimension corrections (edited L×W) live in the same DB's `dimension_correction` table, feed `dim_overrides` into `analyze()`/`build_used_floors()`, and export as a downloadable WMS corrections CSV.
-- Packing is visualized as one continuous trailer strip per expanded trailer (dance nose end-to-end with general rear) via Plotly. Every equipment on the trailer is drawn; items that won't pack (and FAIL/AMBIGUOUS) are shown in red, typically outside the floor outline via `display_pack` / `pack_floor_best_effort`. Per-trailer detail is lazy behind Expand/Collapse in `st.session_state["expanded_trailers"]`.
+- Packing is visualized as one continuous trailer outline per expanded trailer (dance nose end-to-end with general rear, visually distinguished sections) via Plotly. Placements come from the same `pack_floor` / `pack_floor_best_effort` path as analysis (`display_pack`); every equipment box stays on the trailer rectangle, and overlaps use translucent hatch + dashed outlines. Per-trailer detail is lazy behind Expand/Collapse in `st.session_state["expanded_trailers"]`.

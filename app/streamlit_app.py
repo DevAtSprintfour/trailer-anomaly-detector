@@ -321,12 +321,10 @@ st.subheader("Trailers")
 st.caption(
     "One row per selected trailer with fail/ambiguous counts up front. Click "
     "**Expand** to see every piece of equipment on that trailer for the "
-    "selected race. The diagram uses the same packer as analysis. Items that "
-    "won't pack are shown in a labeled gutter under their floor (not stacked "
-    "on top of packed tiles); any true overlaps are drawn translucent. Every "
-    "box shows name, ID, and L×W on the tile. Dance (warm) / general (cool) "
-    "share one outline. Check **Verified** or edit L×W inline; download WMS "
-    "corrections at the bottom when finished."
+    "selected race. Everything is drawn on the trailer floor rectangle; "
+    "overlaps use translucent hatch + dashed outlines. Every box shows name, "
+    "ID, and L×W. Dance (warm) / general (cool) share one outline. Check "
+    "**Verified** or edit L×W inline; download WMS corrections at the bottom."
 )
 
 floors_by_trailer: Dict[str, list] = {}
