@@ -13,3 +13,6 @@ __pycache__/
 
 # Brainstorm / local agent artifacts
 .superpowers/
+
+# Local checklist/verification state (per-machine, not shared)
+data/checklist.db
