@@ -1,14 +1,13 @@
-"""Render a trailer's packing as one interactive Plotly figure.
+"""Render a trailer's packing as one continuous Plotly strip.
 
-Pure function, no Streamlit dependency — returns a plotly.graph_objects.Figure
-the caller renders via st.plotly_chart(fig, use_container_width=True). Shows
-the whole trailer (dance floor stacked above general floor) in a single
-diagram, since dance/general are two physically separate floors an item
-never spans, but the user wants one picture per trailer, not two.
+Dance floor (nose) and general floor (rear) are sections of the same trailer
+drawn end-to-end with no visual gap or stacked boxes — one outline spanning
+dance.length + general.length by shared width. Items pack independently per
+floor; general placements are offset by dance.length on the x-axis.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import plotly.graph_objects as go
 
@@ -29,67 +28,56 @@ STATUS_LINE = {
     "UNKNOWN": "#6e7781",
 }
 
-_GAP_BETWEEN_FLOORS = 30.0  # in, vertical whitespace reserved between the two floor drawings
-_LABEL_HEADROOM = 14.0      # in, space reserved above each floor for its title annotation
-_CAPTION_FOOTROOM = 14.0    # in, space reserved below each floor for its pack/overflow caption
+
+def _item_by_id(items: List[Item], eid: int) -> Item | None:
+    for it in items:
+        if it.equipment_id == eid:
+            return it
+    return None
 
 
-def _add_floor(fig: go.Figure, fg: FloorGeom, items: List[Item], result: PackResult,
-               verdict: Dict[int, dict], top: float, title: str) -> float:
-    """Draw one floor's outline + placed items with its top edge at y=top
-    (floor occupies [top - fg.width, top]). Returns the y to use as the next
-    floor's top (below this floor's caption + the inter-floor gap)."""
-    bottom = top - fg.width
-    fig.add_shape(
-        type="rect", x0=0, y0=bottom, x1=fg.length, y1=top,
-        line=dict(color="#999", width=1.5), fillcolor="#fafafa", layer="below",
-    )
-    fig.add_annotation(
-        x=2, y=top - 2, text=f"<b>{title}</b> · {fg.length:.0f}×{fg.width:.0f} in",
-        showarrow=False, xanchor="left", yanchor="top",
-        font=dict(size=12, color="#1a1a1a"),
-    )
-
-    placed_ids = {p.equipment_id for p in result.placements}
+def _draw_placements(
+    fig: go.Figure, items: List[Item], result: PackResult,
+    verdict: Dict[int, dict], x_offset: float, y_bottom: float,
+) -> None:
     for p in result.placements:
         eid = p.equipment_id
         status = verdict.get(eid, {}).get("status", "UNKNOWN")
         fill = STATUS_FILL.get(status, "#e2e2e2")
         line = STATUS_LINE.get(status, "#6e7781")
-        label = next((it.label for it in items if it.equipment_id == eid), str(eid))
-        x0, y0 = p.x, bottom + p.y
-        x1, y1 = p.x + p.w, bottom + p.y + p.h
+        it = _item_by_id(items, eid)
+        label = it.label if it else str(eid)
+        # On-file (or corrected) dims — not the post-rotation placement size.
+        file_L = it.length if it else p.w
+        file_W = it.width if it else p.h
+        x0, y0 = x_offset + p.x, y_bottom + p.y
+        x1, y1 = x_offset + p.x + p.w, y_bottom + p.y + p.h
         fig.add_shape(
             type="rect", x0=x0, y0=y0, x1=x1, y1=y1,
             line=dict(color=line, width=1.5), fillcolor=fill,
         )
         fig.add_trace(go.Scatter(
             x=[(x0 + x1) / 2], y=[(y0 + y1) / 2],
-            mode="text", text=[f"{label}<br>#{eid}"],
-            textfont=dict(size=10, color="#1a1a1a"),
-            hovertext=[f"{label} (#{eid}) — {status}<br>{p.w:.0f}×{p.h:.0f} in"],
+            mode="text",
+            text=[f"{label}<br>#{eid}<br>{file_L:.0f}×{file_W:.0f}"],
+            textfont=dict(size=9, color="#1a1a1a"),
+            hovertext=[
+                f"{label} (#{eid}) — {status}<br>"
+                f"on file: {file_L:.0f}×{file_W:.0f} in<br>"
+                f"placed: {p.w:.0f}×{p.h:.0f} in"
+            ],
             hoverinfo="text", showlegend=False,
         ))
 
-    unplaced = [it for it in items if it.equipment_id not in placed_ids]
-    caption_y = bottom - 6
-    if not result.fits and unplaced:
-        names = ", ".join(f"{it.label} (#{it.equipment_id})" for it in unplaced[:6])
-        more = f" (+{len(unplaced) - 6} more)" if len(unplaced) > 6 else ""
-        caption = f"Overflow — could not place: {names}{more}"
-        color = "#cf222e"
-    elif not result.fits:
-        caption = f"Overflow — {result.detail}"
-        color = "#cf222e"
-    else:
-        caption = f"Packed successfully — {result.detail}"
-        color = "#1a7f37"
-    fig.add_annotation(
-        x=0, y=caption_y, text=caption, showarrow=False,
-        xanchor="left", yanchor="top", font=dict(size=11, color=color),
-    )
 
-    return bottom - _CAPTION_FOOTROOM - _GAP_BETWEEN_FLOORS - _LABEL_HEADROOM
+def _overflow_names(items: List[Item], result: PackResult) -> str:
+    placed = {p.equipment_id for p in result.placements}
+    unplaced = [it for it in items if it.equipment_id not in placed]
+    if not unplaced:
+        return result.detail or "overflow"
+    names = ", ".join(f"{it.label} (#{it.equipment_id})" for it in unplaced[:6])
+    more = f" (+{len(unplaced) - 6} more)" if len(unplaced) > 6 else ""
+    return f"{names}{more}"
 
 
 def render_trailer_figure(
@@ -97,30 +85,58 @@ def render_trailer_figure(
     general_geom: FloorGeom, general_items: List[Item], general_result: PackResult,
     verdict: Dict[int, dict],
 ) -> go.Figure:
-    """One combined figure for a trailer: dance floor stacked above general
-    floor, each packed independently but drawn as a single diagram."""
+    """One continuous trailer strip: dance (left/nose) + general (right/rear)."""
     fig = go.Figure()
-    top = 0.0
-    next_top = _add_floor(fig, dance_geom, dance_items, dance_result, verdict, top, "Dance floor")
-    bottom = _add_floor(fig, general_geom, general_items, general_result, verdict, next_top, "General floor")
+    total_length = dance_geom.length + general_geom.length
+    # Widths should match per trailer category; take max so a mistuned width
+    # still draws everything inside the outline.
+    total_width = max(dance_geom.width, general_geom.width)
+    y_bottom, y_top = 0.0, total_width
 
-    max_length = max(dance_geom.length, general_geom.length)
-    x_lo, x_hi = -10, max_length + 10
-    y_lo, y_hi = bottom - 10, top + _LABEL_HEADROOM + 10
+    # Single outer trailer outline — no separate boxes, no visual split.
+    fig.add_shape(
+        type="rect", x0=0, y0=y_bottom, x1=total_length, y1=y_top,
+        line=dict(color="#666", width=2), fillcolor="#fafafa", layer="below",
+    )
+
+    _draw_placements(fig, dance_items, dance_result, verdict, 0.0, y_bottom)
+    _draw_placements(
+        fig, general_items, general_result, verdict, dance_geom.length, y_bottom,
+    )
+
+    # Compact status caption under the strip (not per-floor stacked boxes).
+    parts = []
+    if dance_result.fits:
+        parts.append("dance OK")
+    else:
+        parts.append(f"dance overflow: {_overflow_names(dance_items, dance_result)}")
+    if general_result.fits:
+        parts.append("general OK")
+    else:
+        parts.append(f"general overflow: {_overflow_names(general_items, general_result)}")
+    all_ok = dance_result.fits and general_result.fits
+    fig.add_annotation(
+        x=0, y=y_bottom - 4,
+        text=("Packed successfully — " if all_ok else "Overflow — ") + " · ".join(parts),
+        showarrow=False, xanchor="left", yanchor="top",
+        font=dict(size=11, color="#1a7f37" if all_ok else "#cf222e"),
+    )
+
+    x_lo, x_hi = -8, total_length + 8
+    y_lo, y_hi = y_bottom - 18, y_top + 8
     x_range = x_hi - x_lo
     y_range = y_hi - y_lo
 
     fig.update_xaxes(range=[x_lo, x_hi], showgrid=False, zeroline=False, visible=False)
-    fig.update_yaxes(range=[y_lo, y_hi], showgrid=False, zeroline=False,
-                     visible=False, scaleanchor="x", scaleratio=1)
+    fig.update_yaxes(
+        range=[y_lo, y_hi], showgrid=False, zeroline=False,
+        visible=False, scaleanchor="x", scaleratio=1,
+    )
 
-    # Streamlit stretches the figure to the container width (use_container_width=True),
-    # so height must be derived from that same width to keep the 1:1 data aspect —
-    # a mismatched height forces Plotly to letterbox (shrink the x-domain) instead.
     margin = 10
     assumed_width = 900
     plot_area = assumed_width - 2 * margin
-    height = int(plot_area * (y_range / x_range)) + 2 * margin
+    height = max(120, int(plot_area * (y_range / x_range)) + 2 * margin)
 
     fig.update_layout(
         height=height,

@@ -11,7 +11,7 @@ Blame: leave-one-out + cross-race isolation when possible; else AMBIGUOUS.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from floor_geom import Item, floor_for_slot, floor_geometry, pack_floor
@@ -40,14 +40,19 @@ class UsedFloor:
 
 
 def build_used_floors(df: pd.DataFrame, geom: dict,
-                       category_geom: Dict[str, dict] = None) -> List[UsedFloor]:
+                       category_geom: Dict[str, dict] = None,
+                       dim_overrides: Dict[int, Tuple[float, float]] = None,
+                       ) -> List[UsedFloor]:
     """Group load-sheet rows into (race, trailer, floor) bins.
 
     geom is the flat legacy fallback (dance/general dict) used when a
     trailer's category has no entry in category_geom. category_geom maps
     trailer_category -> per-category dance/general dict.
+    dim_overrides maps equipment_id -> (corrected_length, corrected_width)
+    and replaces stored WMS dims when present.
     """
     cat_geom = category_geom or {}
+    overrides = dim_overrides or {}
     work = df.copy()
     work["floor"] = work["slot"].map(floor_for_slot)
     keys = ["race_id", "trailer_id", "trailer_name", "trailer_view", "floor"]
@@ -64,6 +69,11 @@ def build_used_floors(df: pd.DataFrame, geom: dict,
             if eid is None or eid in seen:
                 continue
             seen.add(eid)
+            if eid in overrides:
+                L, W = overrides[eid]
+                items.append(Item(eid, float(L), float(W),
+                                  str(r.get("equipment_desc") or eid)))
+                continue
             usable = (not r["dims_missing"] and pd.notna(r["eq_length"])
                       and pd.notna(r["eq_width"]) and r["eq_length"] > 0
                       and r["eq_width"] > 0)
@@ -85,14 +95,18 @@ def _floor_fits(items: List[Item], cap_len: float, cap_wid: float, gap: float) -
 
 def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
             cross_reference: bool = True, category_geom: Dict[str, dict] = None,
-            verified: Optional[set] = None) -> Dict[int, dict]:
+            verified: Optional[set] = None,
+            dim_overrides: Dict[int, Tuple[float, float]] = None,
+            ) -> Dict[int, dict]:
     """Return {equipment_id: verdict dict} using floor-level 2D packing.
 
     verified: equipment_ids the user has manually confirmed correct — excluded
     from ambiguous-blame candidacy and forced to RESOLVED status.
+    dim_overrides: equipment_id -> (L, W) replacing stored WMS dims for packing.
     """
-    floors = build_used_floors(df, geom, category_geom)
+    floors = build_used_floors(df, geom, category_geom, dim_overrides)
     verified = set(verified or ())
+    overrides = dim_overrides or {}
 
     appears: Dict[int, List[UsedFloor]] = {}
     for f in floors:
@@ -100,6 +114,8 @@ def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
             appears.setdefault(it.equipment_id, []).append(f)
 
     missing_ids = set(df.loc[df["dims_missing"], "equipment_id"].dropna().astype(int))
+    # An override supplies dims, so the equipment is no longer "missing".
+    missing_ids -= set(overrides)
     eq_ids = set(df["equipment_id"].dropna().astype(int))
 
     # 1) Single-item width: shorter side > floor width → impossible.

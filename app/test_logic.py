@@ -178,6 +178,22 @@ store2.mark_verified(equipment_id=201, race_id=2, trailer_id=10, floor="dance", 
 records = store2.list_records()
 check("list_records returns entries", any(r["equipment_id"] == 201 for r in records))
 
+# Dimension corrections
+check("no corrections initially", store2.get_dimension_corrections() == {})
+store2.set_dimension_correction(500, corrected_length=100, corrected_width=40,
+                                original_length=400, original_width=90)
+check("set_dimension_correction persists",
+      store2.get_dimension_corrections()[500] == (100.0, 40.0))
+store3 = ChecklistStore(_tmp_db)
+check("corrections survive reopen",
+      store3.get_dimension_corrections()[500] == (100.0, 40.0))
+listed = store3.list_dimension_corrections()
+check("list_dimension_corrections has original dims",
+      any(r["equipment_id"] == 500 and r["original_length"] == 400 for r in listed))
+store3.clear_dimension_correction(500)
+check("clear_dimension_correction removes it",
+      500 not in store3.get_dimension_corrections())
+
 import os as _os
 _os.unlink(_tmp_db)
 
@@ -205,7 +221,17 @@ check("verified item (3-way) forced to RESOLVED", v2[310]["status"] == RESOLVED)
 check("remaining floor-mates re-blamed without verified item -> AMBIGUOUS",
       v2[311]["status"] == AMBIGUOUS and v2[312]["status"] == AMBIGUOUS)
 
-# --- Packing diagram: one combined Plotly figure per trailer (dance + general) ---
+# --- Dimension overrides: correcting one oversized item lets the floor pack ---
+df3 = mk([row(22, 9, "T-22", "Cup", 5, 320, 500, 90, desc="oversized"),
+          row(22, 9, "T-22", "Cup", 7, 321, 40, 30, desc="ok")])
+v_bad = analyze(df3, gap=2, geom={}, cross_reference=True)
+check("before override oversized is FAIL", v_bad[320]["status"] == FAIL)
+v_fixed = analyze(df3, gap=2, geom={}, cross_reference=True,
+                  dim_overrides={320: (100.0, 40.0)})
+check("dim override on oversized -> PASS", v_fixed[320]["status"] == PASS)
+check("mate still PASS after override", v_fixed[321]["status"] == PASS)
+
+# --- Packing diagram: continuous trailer strip (dance nose + general rear) ---
 from packing_viz import render_trailer_figure
 import plotly.graph_objects as go
 
@@ -223,14 +249,21 @@ fig = render_trailer_figure(
 )
 check("render_trailer_figure returns a plotly Figure", isinstance(fig, go.Figure))
 n_rects = sum(1 for s in fig.layout.shapes if s.type == "rect")
-check("figure has a rect per placed item + 2 floor outlines",
-      n_rects == len(dance_result.placements) + len(general_result.placements) + 2)
-labels_text = " ".join(str(t.text) for tr in fig.data for t in [tr] if hasattr(tr, "text"))
+# One continuous trailer outline + one rect per placed item (no separate floors).
+check("figure has one trailer outline + one rect per placed item",
+      n_rects == 1 + len(dance_result.placements) + len(general_result.placements))
+outline = next(s for s in fig.layout.shapes
+               if s.type == "rect" and abs(s.x1 - (dance_fg.length + general_fg.length)) < 0.01)
+check("trailer outline spans dance+general length",
+      abs(outline.x1 - (dance_fg.length + general_fg.length)) < 0.01)
+labels_blob = " ".join(str(getattr(tr, "text", "")) for tr in fig.data)
 check("figure labels include equipment name and id",
-      "CTS1 TB Stack" in str(fig.data) and "9001" in str(fig.data))
+      "CTS1 TB Stack" in labels_blob and "9001" in labels_blob)
+check("figure labels include on-file dimensions",
+      "60×38" in labels_blob or "60x38" in labels_blob)
 
 # Overflow case: item too big to fit at all -> renderer should still return a
-# valid figure (drawing the floor outline + an overflow annotation), not crash.
+# valid figure (drawing the trailer outline + an overflow annotation), not crash.
 big_general_items = [Item(9004, 900, 90, "oversized")]
 big_general_result = pack_floor(big_general_items, general_fg.length, general_fg.width, gap=2)
 fig2 = render_trailer_figure(

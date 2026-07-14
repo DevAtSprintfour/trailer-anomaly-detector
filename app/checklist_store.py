@@ -1,17 +1,16 @@
-"""SQLite-backed checklist store for manually-verified equipment.
+"""SQLite-backed checklist store: verification + dimension corrections.
 
-Lets a user mark an equipment_id (in the context of a specific race/trailer/
-floor) as verified — meaning they physically confirmed the stored dimensions
-are correct despite the analyzer flagging it FAIL/AMBIGUOUS. Verified items
-are excluded from blame candidacy on the next analyze() run (see analysis.py).
+Verification: mark an equipment_id (in a race/trailer/floor context) as
+physically confirmed correct despite FAIL/AMBIGUOUS — excluded from blame.
 
-Persisted at data/checklist.db by default so it survives Streamlit reruns
-and app restarts.
+Dimension corrections: override stored WMS L×W for an equipment_id. These
+feed reprocessing immediately and export as a downloadable list of WMS
+changes. Persisted at data/checklist.db.
 """
 from __future__ import annotations
 
 import sqlite3
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 
 _SCHEMA = """
@@ -24,6 +23,15 @@ CREATE TABLE IF NOT EXISTS verification (
     verified_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (equipment_id, race_id, trailer_id, floor)
 );
+CREATE TABLE IF NOT EXISTS dimension_correction (
+    equipment_id INTEGER PRIMARY KEY,
+    corrected_length REAL NOT NULL,
+    corrected_width REAL NOT NULL,
+    original_length REAL,
+    original_width REAL,
+    note TEXT DEFAULT '',
+    corrected_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -32,7 +40,7 @@ class ChecklistStore:
         self.db_path = db_path
         conn = sqlite3.connect(self.db_path)
         try:
-            conn.execute(_SCHEMA)
+            conn.executescript(_SCHEMA)
             conn.commit()
         finally:
             conn.close()
@@ -90,6 +98,65 @@ class ChecklistStore:
             rows = conn.execute(
                 "SELECT equipment_id, race_id, trailer_id, floor, note, verified_at "
                 "FROM verification ORDER BY verified_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def set_dimension_correction(
+        self, equipment_id: int, corrected_length: float, corrected_width: float,
+        original_length: Optional[float] = None,
+        original_width: Optional[float] = None,
+        note: str = "",
+    ) -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO dimension_correction "
+                "(equipment_id, corrected_length, corrected_width, "
+                " original_length, original_width, note, corrected_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+                (equipment_id, corrected_length, corrected_width,
+                 original_length, original_width, note),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def clear_dimension_correction(self, equipment_id: int) -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                "DELETE FROM dimension_correction WHERE equipment_id = ?",
+                (equipment_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_dimension_corrections(self) -> Dict[int, Tuple[float, float]]:
+        """Return {equipment_id: (corrected_length, corrected_width)}."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT equipment_id, corrected_length, corrected_width "
+                "FROM dimension_correction"
+            ).fetchall()
+            return {
+                int(r["equipment_id"]): (float(r["corrected_length"]),
+                                         float(r["corrected_width"]))
+                for r in rows
+            }
+        finally:
+            conn.close()
+
+    def list_dimension_corrections(self) -> List[Dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT equipment_id, corrected_length, corrected_width, "
+                "original_length, original_width, note, corrected_at "
+                "FROM dimension_correction ORDER BY corrected_at DESC"
             ).fetchall()
             return [dict(r) for r in rows]
         finally:
