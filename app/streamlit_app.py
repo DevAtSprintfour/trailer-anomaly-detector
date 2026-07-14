@@ -224,37 +224,48 @@ st.caption(
     "2D-pack into a floor that worked are flagged for re-scan."
 )
 
-# ------------------------------------------------------------------ multi-select filter + reprocess
+# ------------------------------------------------------------------ race + trailer filter + reprocess
 st.subheader("Filter")
 st.caption(
-    "Select one or more races and one or more trailers. All races are "
-    "selected by default. The trailer list updates to match your race "
-    "selection, and changing the selection **reprocesses** analysis on "
-    "exactly that subset — it does not just re-filter a season-wide result."
+    "Select **one race** and one or more trailers. The trailer list updates "
+    "to match the race, and changing the selection **reprocesses** analysis "
+    "on exactly that subset — it does not just re-filter a season-wide result."
 )
 
 all_race_ids = sorted(race_labels)
+# Migrate old multi-race session key if present.
+if "filter_races" in st.session_state and "filter_race" not in st.session_state:
+    _old = st.session_state.pop("filter_races")
+    if isinstance(_old, list) and _old:
+        st.session_state["filter_race"] = _old[0]
+    elif isinstance(_old, int):
+        st.session_state["filter_race"] = _old
+elif "filter_races" in st.session_state:
+    st.session_state.pop("filter_races", None)
+
+default_race = all_race_ids[0] if all_race_ids else None
+for rid in all_race_ids:
+    if rid in overflow_races:
+        default_race = rid
+        break
+
 f1, f2 = st.columns(2)
 with f1:
-    prev_races = st.session_state.get("filter_races")
-    if prev_races is not None:
-        valid = [r for r in prev_races if r in all_race_ids]
-        if valid != prev_races:
-            st.session_state["filter_races"] = valid or all_race_ids
-    sel_race_ids = st.multiselect(
-        "Races", all_race_ids, default=all_race_ids,
+    if st.session_state.get("filter_race") not in all_race_ids:
+        st.session_state["filter_race"] = default_race
+    sel_race = st.selectbox(
+        "Race", all_race_ids,
         format_func=lambda r: race_labels.get(r, str(r)),
-        key="filter_races",
+        key="filter_race",
     )
-if not sel_race_ids:
-    sel_race_ids = all_race_ids  # never allow an empty race scope
+sel_race_ids = [sel_race] if sel_race is not None else []
 
 trailers_available = work[work.race_id.isin(sel_race_ids)]
 trailer_names_all = sorted(trailers_available["trailer_name"].dropna().unique().tolist())
 
 
 def _trailer_sort_key(t):
-    has = any((rid, t) in overflow_pairs for rid in sel_race_ids)
+    has = (sel_race, t) in overflow_pairs if sel_race is not None else False
     return (0 if has else 1, t)
 
 
@@ -274,7 +285,7 @@ with f2:
 if not sel_trailers:
     sel_trailers = trailer_names_all  # never allow an empty trailer scope
 
-# --- Reprocess (not just filter) on exactly the selected races + trailers ---
+# --- Reprocess (not just filter) on exactly the selected race + trailers ---
 scoped = work[work.race_id.isin(sel_race_ids) & work.trailer_name.isin(sel_trailers)].copy()
 verdict = analyze(scoped, gap=gap, geom=geom, cross_reference=cross_ref,
                   category_geom=category_geom, verified=verified_ids,
@@ -282,8 +293,8 @@ verdict = analyze(scoped, gap=gap, geom=geom, cross_reference=cross_ref,
 scoped_eids = set(scoped["equipment_id"].dropna().astype(int))
 
 st.info(
-    f"Reprocessed: **{len(sel_race_ids)}** race(s) selected of {len(all_race_ids)} · "
-    f"**{len(sel_trailers)}** trailer(s) selected of {len(trailer_names_all)}  \n"
+    f"Reprocessed: **{race_labels.get(sel_race, sel_race)}** · "
+    f"**{len(sel_trailers)}** trailer(s) of {len(trailer_names_all)}  \n"
     f"({len(scoped)} load-sheet rows · {scoped['equipment_id'].nunique()} equipment)"
 )
 
@@ -293,11 +304,11 @@ st.divider()
 st.subheader("Trailers")
 st.caption(
     "One row per selected trailer with fail/ambiguous counts up front. Click "
-    "**Expand** to render its equipment list and packing diagram (one "
-    "continuous trailer strip per race). Only expanded trailers render "
-    "tables/diagrams. Check **Verified** if stored dims are actually "
-    "correct, or edit L×W inline to correct them (reprocesses immediately). "
-    "Download the WMS correction list at the bottom when finished."
+    "**Expand** to see every piece of equipment packed on that trailer for "
+    "the selected race — overflow items are drawn in red below the strip. "
+    "Check **Verified** if stored dims are actually correct, or edit L×W "
+    "inline to correct them (reprocesses immediately). Download the WMS "
+    "correction list at the bottom when finished."
 )
 
 floors_by_trailer: Dict[str, list] = {}
@@ -331,115 +342,107 @@ for tname in sorted(sel_trailers, key=_trailer_sort_key):
 
     with st.container(border=True):
         if not tfloors:
-            st.write("No load-sheet rows for this trailer in the selected scope.")
+            st.write("No load-sheet rows for this trailer in the selected race.")
             st.divider()
             continue
-
-        races_here = sorted({f.race_id for f in tfloors})
-        multi_race = len(races_here) > 1
 
         trailer_resolved_geom = category_geom.get(category, geom)
         dance_fg = floor_geometry(FLOOR_DANCE, trailer_resolved_geom)
         general_fg = floor_geometry(FLOOR_GENERAL, trailer_resolved_geom)
-        # every UsedFloor for this trailer resolved geometry from the same
-        # category, so any floor's trailer_id is the trailer's id
         trailer_id = tfloors[0].trailer_id
+        rid = int(sel_race)
 
-        for rid in races_here:
-            if multi_race:
-                st.markdown(f"##### {race_labels.get(rid, rid)}")
-            race_floors = [f for f in tfloors if f.race_id == rid]
-            dance_f = next((f for f in race_floors if f.floor == FLOOR_DANCE), None)
-            general_f = next((f for f in race_floors if f.floor == FLOOR_GENERAL), None)
+        dance_f = next((f for f in tfloors if f.floor == FLOOR_DANCE), None)
+        general_f = next((f for f in tfloors if f.floor == FLOOR_GENERAL), None)
 
-            dance_items = dance_f.items if dance_f else []
-            general_items = general_f.items if general_f else []
-            dance_result = pack_floor(dance_items, dance_fg.length, dance_fg.width, gap)
-            general_result = pack_floor(general_items, general_fg.length, general_fg.width, gap)
+        dance_items = dance_f.items if dance_f else []
+        general_items = general_f.items if general_f else []
+        dance_result = pack_floor(dance_items, dance_fg.length, dance_fg.width, gap)
+        general_result = pack_floor(general_items, general_fg.length, general_fg.width, gap)
 
-            ids_here = {it.equipment_id for it in dance_items} | {it.equipment_id for it in general_items}
-            tbl = equipment_table(ids_here, verdict)
-            st.dataframe(
-                tbl.style.map(color_status, subset=["status"]),
-                use_container_width=True, hide_index=True,
+        ids_here = {it.equipment_id for it in dance_items} | {it.equipment_id for it in general_items}
+        tbl = equipment_table(ids_here, verdict)
+        st.dataframe(
+            tbl.style.map(color_status, subset=["status"]),
+            use_container_width=True, hide_index=True,
+        )
+
+        fig = render_trailer_figure(
+            dance_fg, dance_items,
+            general_fg, general_items,
+            verdict, gap=gap,
+            dance_result=dance_result,
+            general_result=general_result,
+        )
+        st.plotly_chart(fig, use_container_width=True,
+                        key=f"chart_{tname}_{rid}")
+
+        for eid in sorted(ids_here):
+            v = verdict.get(eid)
+            if v is None:
+                continue
+            needs_action = v["status"] in (FAIL, AMBIGUOUS) or eid in dim_overrides
+            if not needs_action:
+                continue
+            floor_key = FLOOR_DANCE if any(it.equipment_id == eid for it in dance_items) else FLOOR_GENERAL
+            meta = eq_meta.loc[eid] if eid in eq_meta.index else None
+            orig_L = float(meta["eq_length"]) if meta is not None and pd.notna(meta["eq_length"]) else 0.0
+            orig_W = float(meta["eq_width"]) if meta is not None and pd.notna(meta["eq_width"]) else 0.0
+            cur_L, cur_W = dim_overrides.get(eid, (orig_L, orig_W))
+            desc = meta["equipment_desc"] if meta is not None else eid
+            st.markdown(f"**#{eid}** — {desc} · status `{v['status']}`")
+
+            c_L, c_W, c_reset = st.columns([1, 1, 1])
+            new_L = c_L.number_input(
+                "Length (in)", min_value=0.0, step=1.0, value=float(cur_L or 0.0),
+                key=f"dimL_{eid}_{rid}_{trailer_id}",
             )
-
-            fig = render_trailer_figure(
-                dance_fg, dance_items, dance_result,
-                general_fg, general_items, general_result,
-                verdict,
+            new_W = c_W.number_input(
+                "Width (in)", min_value=0.0, step=1.0, value=float(cur_W or 0.0),
+                key=f"dimW_{eid}_{rid}_{trailer_id}",
             )
-            st.plotly_chart(fig, use_container_width=True,
-                            key=f"chart_{tname}_{rid}")
+            if c_reset.button("Reset dims", key=f"dimReset_{eid}_{rid}_{trailer_id}"):
+                checklist.clear_dimension_correction(eid)
+                st.session_state.pop(f"dimL_{eid}_{rid}_{trailer_id}", None)
+                st.session_state.pop(f"dimW_{eid}_{rid}_{trailer_id}", None)
+                st.rerun()
 
-            for eid in sorted(ids_here):
-                v = verdict.get(eid)
-                if v is None:
-                    continue
-                needs_action = v["status"] in (FAIL, AMBIGUOUS) or eid in dim_overrides
-                if not needs_action:
-                    continue
-                floor_key = FLOOR_DANCE if any(it.equipment_id == eid for it in dance_items) else FLOOR_GENERAL
-                meta = eq_meta.loc[eid] if eid in eq_meta.index else None
-                orig_L = float(meta["eq_length"]) if meta is not None and pd.notna(meta["eq_length"]) else 0.0
-                orig_W = float(meta["eq_width"]) if meta is not None and pd.notna(meta["eq_width"]) else 0.0
-                cur_L, cur_W = dim_overrides.get(eid, (orig_L, orig_W))
-                desc = meta["equipment_desc"] if meta is not None else eid
-                st.markdown(f"**#{eid}** — {desc} · status `{v['status']}`")
-
-                c_L, c_W, c_reset = st.columns([1, 1, 1])
-                new_L = c_L.number_input(
-                    "Length (in)", min_value=0.0, step=1.0, value=float(cur_L or 0.0),
-                    key=f"dimL_{eid}_{rid}_{trailer_id}",
+            target = (float(new_L), float(new_W))
+            current = dim_overrides.get(eid)
+            original = (float(orig_L), float(orig_W))
+            if current is None and target != original and new_L > 0 and new_W > 0:
+                checklist.set_dimension_correction(
+                    eid, new_L, new_W, orig_L, orig_W,
                 )
-                new_W = c_W.number_input(
-                    "Width (in)", min_value=0.0, step=1.0, value=float(cur_W or 0.0),
-                    key=f"dimW_{eid}_{rid}_{trailer_id}",
-                )
-                if c_reset.button("Reset dims", key=f"dimReset_{eid}_{rid}_{trailer_id}"):
+                st.rerun()
+            elif current is not None and target != (float(current[0]), float(current[1])):
+                if target == original or new_L <= 0 or new_W <= 0:
                     checklist.clear_dimension_correction(eid)
-                    st.session_state.pop(f"dimL_{eid}_{rid}_{trailer_id}", None)
-                    st.session_state.pop(f"dimW_{eid}_{rid}_{trailer_id}", None)
-                    st.rerun()
-
-                # Persist correction when the user changes L/W away from the
-                # current override (or the original WMS values).
-                target = (float(new_L), float(new_W))
-                current = dim_overrides.get(eid)
-                original = (float(orig_L), float(orig_W))
-                if current is None and target != original and new_L > 0 and new_W > 0:
+                else:
                     checklist.set_dimension_correction(
                         eid, new_L, new_W, orig_L, orig_W,
                     )
-                    st.rerun()
-                elif current is not None and target != (float(current[0]), float(current[1])):
-                    if target == original or new_L <= 0 or new_W <= 0:
-                        checklist.clear_dimension_correction(eid)
-                    else:
-                        checklist.set_dimension_correction(
-                            eid, new_L, new_W, orig_L, orig_W,
-                        )
-                    st.rerun()
+                st.rerun()
 
-                if v["status"] in (FAIL, AMBIGUOUS):
-                    already = eid in verified_ids
-                    c_check, c_note = st.columns([1, 3])
-                    checked = c_check.checkbox(
-                        f"Verified #{eid} (dims correct as stored)",
-                        value=already,
-                        key=f"verify_{eid}_{rid}_{trailer_id}_{floor_key}",
-                    )
-                    note = c_note.text_input(
-                        "Note", value="", label_visibility="collapsed",
-                        placeholder="why this is actually correct",
-                        key=f"note_{eid}_{rid}_{trailer_id}_{floor_key}",
-                    )
-                    if checked and not already:
-                        checklist.mark_verified(eid, rid, trailer_id, floor_key, note)
-                        st.rerun()
-                    elif not checked and already:
-                        checklist.unmark_verified(eid, rid, trailer_id, floor_key)
-                        st.rerun()
+            if v["status"] in (FAIL, AMBIGUOUS):
+                already = eid in verified_ids
+                c_check, c_note = st.columns([1, 3])
+                checked = c_check.checkbox(
+                    f"Verified #{eid} (dims correct as stored)",
+                    value=already,
+                    key=f"verify_{eid}_{rid}_{trailer_id}_{floor_key}",
+                )
+                note = c_note.text_input(
+                    "Note", value="", label_visibility="collapsed",
+                    placeholder="why this is actually correct",
+                    key=f"note_{eid}_{rid}_{trailer_id}_{floor_key}",
+                )
+                if checked and not already:
+                    checklist.mark_verified(eid, rid, trailer_id, floor_key, note)
+                    st.rerun()
+                elif not checked and already:
+                    checklist.unmark_verified(eid, rid, trailer_id, floor_key)
+                    st.rerun()
     st.divider()
 
 # ------------------------------------------------------------------ summary across selected scope

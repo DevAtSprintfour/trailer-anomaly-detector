@@ -231,27 +231,26 @@ v_fixed = analyze(df3, gap=2, geom={}, cross_reference=True,
 check("dim override on oversized -> PASS", v_fixed[320]["status"] == PASS)
 check("mate still PASS after override", v_fixed[321]["status"] == PASS)
 
-# --- Packing diagram: continuous trailer strip (dance nose + general rear) ---
-from packing_viz import render_trailer_figure
+# --- Packing diagram: continuous trailer strip; overflow items drawn in red ---
+from packing_viz import render_trailer_figure, display_pack
+from floor_geom import pack_floor_best_effort
 import plotly.graph_objects as go
 
 dance_fg = floor_geometry(FLOOR_DANCE)
 general_fg = floor_geometry(FLOOR_GENERAL)
 dance_items = [Item(9001, 60, 38, "CTS1 TB Stack")]
-dance_result = pack_floor(dance_items, dance_fg.length, dance_fg.width, gap=2)
 general_items = [Item(9002, 200, 40, "widget-a"), Item(9003, 200, 40, "widget-b")]
-general_result = pack_floor(general_items, general_fg.length, general_fg.width, gap=2)
 
 fig = render_trailer_figure(
-    dance_fg, dance_items, dance_result,
-    general_fg, general_items, general_result,
+    dance_fg, dance_items,
+    general_fg, general_items,
     verdict={9001: {"status": "PASS"}, 9002: {"status": "PASS"}, 9003: {"status": "PASS"}},
+    gap=2.0,
 )
 check("render_trailer_figure returns a plotly Figure", isinstance(fig, go.Figure))
 n_rects = sum(1 for s in fig.layout.shapes if s.type == "rect")
-# One continuous trailer outline + one rect per placed item (no separate floors).
-check("figure has one trailer outline + one rect per placed item",
-      n_rects == 1 + len(dance_result.placements) + len(general_result.placements))
+check("figure draws trailer outline + every placed item",
+      n_rects == 1 + 1 + 2)  # outline + 1 dance + 2 general
 outline = next(s for s in fig.layout.shapes
                if s.type == "rect" and abs(s.x1 - (dance_fg.length + general_fg.length)) < 0.01)
 check("trailer outline spans dance+general length",
@@ -262,15 +261,35 @@ check("figure labels include equipment name and id",
 check("figure labels include on-file dimensions",
       "60×38" in labels_blob or "60x38" in labels_blob)
 
-# Overflow case: item too big to fit at all -> renderer should still return a
-# valid figure (drawing the trailer outline + an overflow annotation), not crash.
-big_general_items = [Item(9004, 900, 90, "oversized")]
-big_general_result = pack_floor(big_general_items, general_fg.length, general_fg.width, gap=2)
+# Overflow case: unique FAIL item should still appear (in red outside floor),
+# while floor-mates pack inside the outline.
+big_general_items = [Item(9004, 500, 90, "oversized"), Item(9005, 40, 30, "ok")]
+placed, overflow, exact = display_pack(
+    big_general_items, general_fg.length, general_fg.width, 2.0,
+    verdict={9004: {"status": "FAIL"}, 9005: {"status": "PASS"}},
+)
+check("display_pack leaves FAIL item as overflow",
+      [it.equipment_id for it in overflow] == [9004])
+check("display_pack packs the OK mate inside",
+      [p.equipment_id for p in placed] == [9005])
+check("exact pack reports does-not-fit", not exact.fits)
+
 fig2 = render_trailer_figure(
-    dance_fg, [], pack_floor([], dance_fg.length, dance_fg.width, gap=2),
-    general_fg, big_general_items, big_general_result,
-    verdict={9004: {"status": "FAIL"}},
+    dance_fg, [],
+    general_fg, big_general_items,
+    verdict={9004: {"status": "FAIL"}, 9005: {"status": "PASS"}},
+    gap=2.0,
 )
 check("overflow figure still valid", isinstance(fig2, go.Figure))
+n_rects2 = sum(1 for s in fig2.layout.shapes if s.type == "rect")
+# outline + 1 placed mate + 1 overflow FAIL item
+check("overflow figure draws all equipment including red overflow",
+      n_rects2 == 1 + 1 + 1)
+
+# best-effort: two large items that can't both fit — places one, overflows one
+pair = [Item(9010, 400, 90, "a"), Item(9011, 400, 90, "b")]
+be_placed, be_unplaced = pack_floor_best_effort(pair, general_fg.length, general_fg.width, gap=2)
+check("best_effort places one of two large items", len(be_placed) == 1)
+check("best_effort leaves one of two large items unplaced", len(be_unplaced) == 1)
 
 print("\nALL TESTS PASSED")

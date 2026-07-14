@@ -136,6 +136,26 @@ def _prune_free(free: List[_FreeRect]) -> List[_FreeRect]:
     return kept
 
 
+def _place_and_split(free: List[_FreeRect], x: float, y: float,
+                     iw: float, ih: float) -> List[_FreeRect]:
+    """Punch an inflated placed rect out of free-rect list (MaxRects split)."""
+    new_free: List[_FreeRect] = []
+    for fr in free:
+        if (x + iw <= fr.x + 1e-9 or fr.x + fr.w <= x + 1e-9
+                or y + ih <= fr.y + 1e-9 or fr.y + fr.h <= y + 1e-9):
+            new_free.append(fr)
+            continue
+        if x > fr.x + 1e-9:  # left
+            new_free.append(_FreeRect(fr.x, fr.y, x - fr.x, fr.h))
+        if x + iw < fr.x + fr.w - 1e-9:  # right
+            new_free.append(_FreeRect(x + iw, fr.y, (fr.x + fr.w) - (x + iw), fr.h))
+        if y > fr.y + 1e-9:  # below
+            new_free.append(_FreeRect(fr.x, fr.y, fr.w, y - fr.y))
+        if y + ih < fr.y + fr.h - 1e-9:  # above
+            new_free.append(_FreeRect(fr.x, y + ih, fr.w, (fr.y + fr.h) - (y + ih)))
+    return _prune_free(new_free)
+
+
 def _try_pack_order(items: List[Item], bin_w: float, bin_h: float,
                     gap: float) -> Optional[List[Placement]]:
     """MaxRects-BSSF for one item order. bin is already inflated (W+gap, L+gap)."""
@@ -143,7 +163,7 @@ def _try_pack_order(items: List[Item], bin_w: float, bin_h: float,
     placements: List[Placement] = []
 
     for it in items:
-        best = None  # (score, fr_idx, x, y, w, h)  — w/h are inflated
+        best = None  # (score, fr_idx, x, y, iw, ih, ow, oh)
         for fr_i, fr in enumerate(free):
             for ow, oh in _orientations(it):
                 iw, ih = _inflate(ow, oh, gap)
@@ -157,25 +177,35 @@ def _try_pack_order(items: List[Item], bin_w: float, bin_h: float,
             return None
         _, fr_i, x, y, iw, ih, ow, oh = best
         placements.append(Placement(it.equipment_id, x, y, ow, oh))
-        # split the chosen free rect; also punch the placed rect out of all free rects
-        new_free: List[_FreeRect] = []
-        for fr in free:
-            # no overlap with placed inflated rect
-            if (x + iw <= fr.x + 1e-9 or fr.x + fr.w <= x + 1e-9
-                    or y + ih <= fr.y + 1e-9 or fr.y + fr.h <= y + 1e-9):
-                new_free.append(fr)
-                continue
-            # overlap — split into up to 4 remainders (MaxRects)
-            if x > fr.x + 1e-9:  # left
-                new_free.append(_FreeRect(fr.x, fr.y, x - fr.x, fr.h))
-            if x + iw < fr.x + fr.w - 1e-9:  # right
-                new_free.append(_FreeRect(x + iw, fr.y, (fr.x + fr.w) - (x + iw), fr.h))
-            if y > fr.y + 1e-9:  # below
-                new_free.append(_FreeRect(fr.x, fr.y, fr.w, y - fr.y))
-            if y + ih < fr.y + fr.h - 1e-9:  # above
-                new_free.append(_FreeRect(fr.x, y + ih, fr.w, (fr.y + fr.h) - (y + ih)))
-        free = _prune_free(new_free)
+        free = _place_and_split(free, x, y, iw, ih)
     return placements
+
+
+def _try_pack_order_partial(items: List[Item], bin_w: float, bin_h: float,
+                            gap: float) -> Tuple[List[Placement], List[Item]]:
+    """Like _try_pack_order but skips items that won't fit (best-effort viz)."""
+    free = [_FreeRect(0.0, 0.0, bin_w, bin_h)]
+    placements: List[Placement] = []
+    unplaced: List[Item] = []
+
+    for it in items:
+        best = None
+        for fr_i, fr in enumerate(free):
+            for ow, oh in _orientations(it):
+                iw, ih = _inflate(ow, oh, gap)
+                if not _fits_in(fr, iw, ih):
+                    continue
+                score = _score_bssf(fr, iw, ih)
+                cand = (score, fr_i, fr.x, fr.y, iw, ih, ow, oh)
+                if best is None or cand[0] < best[0]:
+                    best = cand
+        if best is None:
+            unplaced.append(it)
+            continue
+        _, fr_i, x, y, iw, ih, ow, oh = best
+        placements.append(Placement(it.equipment_id, x, y, ow, oh))
+        free = _place_and_split(free, x, y, iw, ih)
+    return placements, unplaced
 
 
 def pack_floor(items: List[Item], length: float, width: float,
@@ -230,3 +260,34 @@ def pack_floor(items: List[Item], length: float, width: float,
         max(0.0, area_used - area_cap),
         "no feasible 2D packing",
     )
+
+
+def pack_floor_best_effort(items: List[Item], length: float, width: float,
+                           gap: float = 2.0,
+                           ) -> Tuple[List[Placement], List[Item]]:
+    """Place as many items as possible for visualization.
+
+    Returns (placements_inside_floor, overflow_items). Prefers a full pack
+    when feasible; otherwise tries several sort orders and keeps the one
+    that places the most items.
+    """
+    full = pack_floor(items, length, width, gap)
+    if full.fits:
+        return full.placements, []
+
+    bin_w, bin_h = width + gap, length + gap
+    orders = [
+        sorted(items, key=lambda it: max(it.length, it.width), reverse=True),
+        sorted(items, key=lambda it: it.length * it.width, reverse=True),
+        sorted(items, key=lambda it: min(it.length, it.width), reverse=True),
+        list(items),
+    ]
+    best_placed: List[Placement] = []
+    best_unplaced: List[Item] = list(items)
+    for ord_ in orders:
+        placed, unplaced = _try_pack_order_partial(ord_, bin_w, bin_h, gap)
+        if len(placed) > len(best_placed):
+            best_placed, best_unplaced = placed, unplaced
+        if not unplaced:
+            break
+    return best_placed, best_unplaced
