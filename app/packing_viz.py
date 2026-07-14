@@ -1,12 +1,13 @@
 """Render a trailer's packing as one continuous Plotly strip.
 
-ONE outer trailer rectangle: dance (nose, left) + general (rear, right)
-end-to-end. Packer coordinates are (x along floor WIDTH, y along floor
-LENGTH) — this module maps them onto the strip as (X=length, Y=width).
+ONE outer trailer rectangle: dance (nose, left) + general (rear, right).
+Packer coordinates are (x along floor WIDTH, y along floor LENGTH) — mapped
+onto the strip as (X=length, Y=width).
 
-Every equipment item is drawn inside that one outline. Items that cannot
-pack are stacked along the floor-width axis inside their section (and drawn
-last so they stay visible on top of packed items).
+Display packing uses the SAME pack_floor / pack_floor_best_effort logic as
+analysis. Unplaced items are NOT given a fabricated "would fit if we stacked
+differently" layout — they are rooted at the floor nose and allowed to spill
+past the floor bounds so you can see why the packer rejected them.
 """
 from __future__ import annotations
 
@@ -36,6 +37,10 @@ STATUS_LINE = {
 OVERFLOW_FILL = "#f9d7d7"
 OVERFLOW_LINE = "#cf222e"
 
+# Distinct section tints so dance vs general read clearly inside one trailer.
+DANCE_FILL = "#fff6e8"     # warm tint
+GENERAL_FILL = "#f0f4f8"   # cool tint
+
 
 def _item_by_id(items: List[Item], eid: int) -> Item | None:
     for it in items:
@@ -56,10 +61,15 @@ def display_pack(
     items: List[Item], length: float, width: float, gap: float,
     verdict: Dict[int, dict],
 ) -> Tuple[List[Placement], List[Item], PackResult]:
-    """Pack for visualization: fit everything that can; return unplaced separately.
+    """Pack for visualization using the same packer as analysis.
 
-    'Unplaced' is a packing outcome (won't fit), not a table status — those
-    items keep their analysis verdict (FAIL / AMBIGUOUS / …).
+    Returns (placements_inside_floor, unplaced_items, exact_pack_result).
+
+    - Exact pack succeeds → all placed, nothing unplaced.
+    - Unique FAIL blame → show floor packing without the FAIL item(s), with
+      those FAIL items as unplaced (matches leave-one-out).
+    - Otherwise → pack_floor_best_effort: only positions the real packer can
+      achieve inside the bin; remainder are unplaced (no invented layout).
     """
     exact = pack_floor(items, length, width, gap)
     if exact.fits:
@@ -89,40 +99,48 @@ def _placement_to_strip(p: Placement, x_offset: float) -> Tuple[float, float, fl
     return x0, y0, x1, y1
 
 
-def _orient_for_width(it: Item, floor_width: float) -> Tuple[float, float]:
-    """Return (w along width, h along length), preferring to fit in floor_width."""
+def _orient_for_display(it: Item, floor_width: float, floor_length: float) -> Tuple[float, float]:
+    """Same orientation preference the packer tries: fit width first, then length.
+
+    Returns (w along floor width, h along floor length). Does NOT invent an
+    orientation that "almost packs" when neither orientation fits the floor.
+    """
     orientations = [
         (min(it.length, it.width), max(it.length, it.width)),
         (max(it.length, it.width), min(it.length, it.width)),
     ]
+    # Prefer an orientation that fits BOTH axes if any (would have packed alone).
+    for ow, oh in orientations:
+        if ow <= floor_width + 1e-9 and oh <= floor_length + 1e-9:
+            return ow, oh
+    # Prefer one that at least fits width (overflow along length — common for dance).
     for ow, oh in orientations:
         if ow <= floor_width + 1e-9:
+            return ow, oh
+    # Prefer one that at least fits length (overflow along width).
+    for ow, oh in orientations:
+        if oh <= floor_length + 1e-9:
             return ow, oh
     return orientations[0]
 
 
 def unplaced_placements(
-    unplaced: List[Item], floor_width: float, gap: float = 2.0,
+    unplaced: List[Item], floor_width: float, floor_length: float,
+    gap: float = 2.0,
 ) -> List[Placement]:
-    """Stack unplaced items along the WIDTH axis at length=0.
+    """Draw unplaced items at the floor nose, stacked along WIDTH.
 
-    Two too-long dance items (e.g. 140×48) become two side-by-side strips
-    in the dance section (both starting at the nose) instead of chaining
-    end-to-end into general where packed green boxes cover them.
+    Never advances along floor LENGTH into the neighboring section — that was
+    inventing a layout the packer never produces. Items longer than the floor
+    spill past the section boundary (visible overflow). Items that don't fit
+    side-by-side may spill past floor WIDTH; still stay rooted at length=0.
     """
     out: List[Placement] = []
     cursor_w = 0.0
-    row_y = 0.0  # along length
-    row_h = 0.0
     for it in unplaced:
-        ow, oh = _orient_for_width(it, floor_width)
-        if cursor_w > 0 and cursor_w + ow > floor_width + 1e-9:
-            row_y += row_h + gap
-            cursor_w = 0.0
-            row_h = 0.0
-        out.append(Placement(it.equipment_id, x=cursor_w, y=row_y, w=ow, h=oh))
+        ow, oh = _orient_for_display(it, floor_width, floor_length)
+        out.append(Placement(it.equipment_id, x=cursor_w, y=0.0, w=ow, h=oh))
         cursor_w += ow + gap
-        row_h = max(row_h, oh)
     return out
 
 
@@ -186,19 +204,31 @@ def render_trailer_figure(
     dance_result: PackResult = None,
     general_result: PackResult = None,
 ) -> go.Figure:
-    """One continuous trailer rectangle; every item drawn inside it."""
+    """One continuous trailer rectangle; dance/general tinted; packer-faithful."""
     fig = go.Figure()
     total_length = dance_geom.length + general_geom.length
     total_width = max(dance_geom.width, general_geom.width)
 
+    # Section fills first (below items) so dance vs general read clearly.
+    fig.add_shape(
+        type="rect", x0=0, y0=0, x1=dance_geom.length, y1=total_width,
+        line=dict(width=0), fillcolor=DANCE_FILL, layer="below",
+    )
+    fig.add_shape(
+        type="rect", x0=dance_geom.length, y0=0,
+        x1=total_length, y1=total_width,
+        line=dict(width=0), fillcolor=GENERAL_FILL, layer="below",
+    )
+    # Outer trailer outline.
     fig.add_shape(
         type="rect", x0=0, y0=0, x1=total_length, y1=total_width,
-        line=dict(color="#888", width=2), fillcolor="#fafafa", layer="below",
+        line=dict(color="#666", width=2), fillcolor="rgba(0,0,0,0)",
     )
+    # Dance | general divider.
     fig.add_shape(
         type="line", x0=dance_geom.length, y0=0,
         x1=dance_geom.length, y1=total_width,
-        line=dict(color="#bbb", width=1, dash="dot"),
+        line=dict(color="#888", width=1.5, dash="dot"),
     )
     fig.add_annotation(
         x=dance_geom.length / 2, y=total_width + 2,
@@ -224,12 +254,14 @@ def render_trailer_figure(
     if general_result is not None:
         general_exact = general_result
 
-    dance_overflow_pl = unplaced_placements(dance_unplaced, dance_geom.width, gap)
-    general_overflow_pl = unplaced_placements(general_unplaced, general_geom.width, gap)
+    dance_overflow_pl = unplaced_placements(
+        dance_unplaced, dance_geom.width, dance_geom.length, gap,
+    )
+    general_overflow_pl = unplaced_placements(
+        general_unplaced, general_geom.width, general_geom.length, gap,
+    )
 
-    # Draw packed items first, then unplaced on top so they aren't hidden under
-    # a floor-mate in the neighboring section (e.g. too-long dance item spilling
-    # into general under a green PASS box).
+    # Packed first, unplaced on top (visible when they spill past the boundary).
     extents: List[Tuple[float, float]] = [(0.0, total_width)]
     if dance_placed:
         extents.append(_draw_placements(
@@ -279,7 +311,13 @@ def render_trailer_figure(
 
     y_lo = min(0.0, dmin) - 16
     y_hi = max(total_width, dmax) + 14
-    x_lo, x_hi = -8, total_length + 8
+    # Include length-spill from unplaced so spilled boxes aren't clipped.
+    max_x = total_length
+    for p in dance_overflow_pl:
+        max_x = max(max_x, p.y + p.h)
+    for p in general_overflow_pl:
+        max_x = max(max_x, dance_geom.length + p.y + p.h)
+    x_lo, x_hi = -8, max_x + 8
     x_range = x_hi - x_lo
     y_range = max(y_hi - y_lo, 1.0)
 

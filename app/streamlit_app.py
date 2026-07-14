@@ -304,12 +304,12 @@ st.divider()
 st.subheader("Trailers")
 st.caption(
     "One row per selected trailer with fail/ambiguous counts up front. Click "
-    "**Expand** to see every piece of equipment packed on that trailer for "
-    "the selected race. Boxes match table status (FAIL red, AMBIGUOUS amber). "
-    "If a floor's stored dims won't pack, those items are jammed into their "
-    "section so they're still visible. Check **Verified** if stored dims are "
-    "actually correct, or edit L×W inline (reprocesses immediately). Download "
-    "the WMS correction list at the bottom when finished."
+    "**Expand** to see every piece of equipment on that trailer for the "
+    "selected race. The diagram uses the same packer as analysis: items that "
+    "won't pack spill past their floor section (amber=AMBIGUOUS, red=FAIL). "
+    "Dance (warm tint) and general (cool tint) share one trailer outline. "
+    "Check **Verified** or edit L×W inline to reprocess; download WMS "
+    "corrections at the bottom when finished."
 )
 
 floors_by_trailer: Dict[str, list] = {}

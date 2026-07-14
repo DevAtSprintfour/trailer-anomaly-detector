@@ -231,10 +231,18 @@ v_fixed = analyze(df3, gap=2, geom={}, cross_reference=True,
 check("dim override on oversized -> PASS", v_fixed[320]["status"] == PASS)
 check("mate still PASS after override", v_fixed[321]["status"] == PASS)
 
-# --- Packing diagram: continuous trailer strip; overflow items drawn in red ---
-from packing_viz import render_trailer_figure, display_pack
+# --- Packing diagram: continuous trailer strip; display uses same packer ---
+from packing_viz import render_trailer_figure, display_pack, DANCE_FILL, GENERAL_FILL
 from floor_geom import pack_floor_best_effort
 import plotly.graph_objects as go
+
+_BG = {DANCE_FILL, GENERAL_FILL, "rgba(0,0,0,0)"}
+
+
+def _item_rects(fig):
+    return [s for s in fig.layout.shapes
+            if s.type == "rect" and s.fillcolor not in _BG]
+
 
 dance_fg = floor_geometry(FLOOR_DANCE)
 general_fg = floor_geometry(FLOOR_GENERAL)
@@ -248,18 +256,14 @@ fig = render_trailer_figure(
     gap=2.0,
 )
 check("render_trailer_figure returns a plotly Figure", isinstance(fig, go.Figure))
-n_rects = sum(1 for s in fig.layout.shapes if s.type == "rect")
-check("figure draws one trailer outline + every placed item",
-      n_rects == 1 + 1 + 2)  # outline + 1 dance + 2 general
+check("figure draws every placed item", len(_item_rects(fig)) == 3)
 outline = next(s for s in fig.layout.shapes
-               if s.type == "rect" and abs(s.x1 - (dance_fg.length + general_fg.length)) < 0.01
-               and abs(s.y0) < 0.01)
+               if s.type == "rect" and s.fillcolor == "rgba(0,0,0,0)")
 check("trailer outline spans dance+general length",
       abs(outline.x1 - (dance_fg.length + general_fg.length)) < 0.01)
-# Packer maps length→X: a dance item placement must sit in x < dance.length
 dance_item_shapes = [
-    s for s in fig.layout.shapes
-    if s.type == "rect" and s.fillcolor == "#d7f0dd" and s.x1 <= dance_fg.length + 1
+    s for s in _item_rects(fig)
+    if s.fillcolor == "#d7f0dd" and s.x1 <= dance_fg.length + 1
 ]
 check("dance item drawn inside dance section (length on X)",
       len(dance_item_shapes) >= 1)
@@ -269,8 +273,6 @@ check("figure labels include equipment name and id",
 check("figure labels include on-file dimensions",
       "60×38" in labels_blob or "60x38" in labels_blob)
 
-# Overflow case: unique FAIL item still appears (in red, inside the trailer),
-# while floor-mates pack inside the outline.
 big_general_items = [Item(9004, 500, 90, "oversized"), Item(9005, 40, 30, "ok")]
 placed, overflow, exact = display_pack(
     big_general_items, general_fg.length, general_fg.width, 2.0,
@@ -289,29 +291,19 @@ fig2 = render_trailer_figure(
     gap=2.0,
 )
 check("overflow figure still valid", isinstance(fig2, go.Figure))
-n_rects2 = sum(1 for s in fig2.layout.shapes if s.type == "rect")
-# one outline + 1 placed mate + 1 overflow FAIL item (all inside same figure)
-check("overflow figure draws all equipment inside one trailer",
-      n_rects2 == 1 + 1 + 1)
-red_boxes = [s for s in fig2.layout.shapes if s.type == "rect" and s.fillcolor == "#f9d7d7"]
+check("overflow figure draws all equipment", len(_item_rects(fig2)) == 2)
+red_boxes = [s for s in _item_rects(fig2) if s.fillcolor == "#f9d7d7"]
 check("FAIL overflow item is colored red", len(red_boxes) == 1)
-
-# Axis mapping: general items must sit at x >= dance.length
-gen_pass = [
-    s for s in fig2.layout.shapes
-    if s.type == "rect" and s.fillcolor == "#d7f0dd"
-]
+gen_pass = [s for s in _item_rects(fig2) if s.fillcolor == "#d7f0dd"]
 check("general placed item starts at or past dance length",
       gen_pass and gen_pass[0].x0 >= dance_fg.length - 0.1)
 
-# best-effort: two large items that can't both fit — places one, overflows one
 pair = [Item(9010, 400, 90, "a"), Item(9011, 400, 90, "b")]
 be_placed, be_unplaced = pack_floor_best_effort(pair, general_fg.length, general_fg.width, gap=2)
 check("best_effort places one of two large items", len(be_placed) == 1)
 check("best_effort leaves one of two large items unplaced", len(be_unplaced) == 1)
 
-# F-10 style: two dance items too long for dance (140 > 129) + general packs
-# — all 7 equipment must appear; both AMBIGUOUS as distinct amber boxes in dance.
+# F-10: two dance items too long (140 > 129) — both unplaced, spill past dance.
 f10_dance = [Item(7217, 140, 48, "a"), Item(7218, 140, 48, "b")]
 f10_gen = [
     Item(7381, 156, 72, "tele"), Item(7220, 140, 48, "m"),
@@ -321,15 +313,26 @@ v_f10 = {7217: {"status": "AMBIGUOUS"}, 7218: {"status": "AMBIGUOUS"},
          7381: {"status": "PASS"}, 7220: {"status": "PASS"}, 7399: {"status": "PASS"},
          7014: {"status": "PASS"}, 7309: {"status": "PASS"}}
 fig3 = render_trailer_figure(dance_fg, f10_dance, general_fg, f10_gen, v_f10, gap=2)
-n_item_rects = sum(1 for s in fig3.layout.shapes if s.type == "rect") - 1  # minus outline
-check("F-10 style draws all 7 equipment inside one trailer", n_item_rects == 7)
-amb_boxes = [s for s in fig3.layout.shapes
-             if s.type == "rect" and s.fillcolor == "#f7e6b8"]
+check("F-10 style draws all 7 equipment", len(_item_rects(fig3)) == 7)
+amb_boxes = [s for s in _item_rects(fig3) if s.fillcolor == "#f7e6b8"]
 check("F-10 style draws both AMBIGUOUS items as amber boxes", len(amb_boxes) == 2)
-# Side-by-side in dance (different y/width), both starting near nose (x≈0)
-check("both AMBIGUOUS boxes start in the dance section",
-      all(s.x0 < dance_fg.length for s in amb_boxes))
-check("both AMBIGUOUS boxes are stacked on width (not covering each other)",
-      abs(amb_boxes[0].y0 - amb_boxes[1].y0) > 1.0)
+check("both AMBIGUOUS boxes spill past dance length (won't pack)",
+      all(s.x1 > dance_fg.length for s in amb_boxes))
+check("both AMBIGUOUS boxes start at dance nose",
+      all(abs(s.x0) < 1.0 for s in amb_boxes))
+
+# T-07: each alone too long for dance — exact pack places nothing; display matches.
+t07_dance = [Item(7145, 134, 60, "88 pit"), Item(7066, 135, 37, "24 Utility")]
+v_t07 = {7145: {"status": "AMBIGUOUS"}, 7066: {"status": "AMBIGUOUS"}}
+placed_t, unpl_t, exact_t = display_pack(
+    t07_dance, dance_fg.length, dance_fg.width, 2.0, v_t07,
+)
+check("T-07 dance exact pack fails", not exact_t.fits)
+check("T-07 dance display places nothing inside (same as packer)",
+      placed_t == [] and {i.equipment_id for i in unpl_t} == {7145, 7066})
+fig4 = render_trailer_figure(dance_fg, t07_dance, general_fg, [], v_t07, gap=2)
+amb4 = [s for s in _item_rects(fig4) if s.fillcolor == "#f7e6b8"]
+check("T-07 draws both AMBIGUOUS spilling past dance",
+      len(amb4) == 2 and all(s.x1 > dance_fg.length for s in amb4))
 
 print("\nALL TESTS PASSED")
