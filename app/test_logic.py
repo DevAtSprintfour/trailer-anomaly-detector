@@ -311,7 +311,7 @@ check("best_effort places one of two large items", len(be_placed) == 1)
 check("best_effort leaves one of two large items unplaced", len(be_unplaced) == 1)
 
 # F-10 style: two dance items too long for dance (140 > 129) + general packs
-# — all 7 equipment must appear as rects inside one outline.
+# — all 7 equipment must appear; both AMBIGUOUS as distinct amber boxes in dance.
 f10_dance = [Item(7217, 140, 48, "a"), Item(7218, 140, 48, "b")]
 f10_gen = [
     Item(7381, 156, 72, "tele"), Item(7220, 140, 48, "m"),
@@ -323,5 +323,13 @@ v_f10 = {7217: {"status": "AMBIGUOUS"}, 7218: {"status": "AMBIGUOUS"},
 fig3 = render_trailer_figure(dance_fg, f10_dance, general_fg, f10_gen, v_f10, gap=2)
 n_item_rects = sum(1 for s in fig3.layout.shapes if s.type == "rect") - 1  # minus outline
 check("F-10 style draws all 7 equipment inside one trailer", n_item_rects == 7)
+amb_boxes = [s for s in fig3.layout.shapes
+             if s.type == "rect" and s.fillcolor == "#f7e6b8"]
+check("F-10 style draws both AMBIGUOUS items as amber boxes", len(amb_boxes) == 2)
+# Side-by-side in dance (different y/width), both starting near nose (x≈0)
+check("both AMBIGUOUS boxes start in the dance section",
+      all(s.x0 < dance_fg.length for s in amb_boxes))
+check("both AMBIGUOUS boxes are stacked on width (not covering each other)",
+      abs(amb_boxes[0].y0 - amb_boxes[1].y0) > 1.0)
 
 print("\nALL TESTS PASSED")

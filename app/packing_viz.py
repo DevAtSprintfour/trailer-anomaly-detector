@@ -5,8 +5,8 @@ end-to-end. Packer coordinates are (x along floor WIDTH, y along floor
 LENGTH) — this module maps them onto the strip as (X=length, Y=width).
 
 Every equipment item is drawn inside that one outline. Items that cannot
-pack are jammed into their floor section in red (may visually spill past
-the floor bounds) so there is never a second detached diagram.
+pack are stacked along the floor-width axis inside their section (and drawn
+last so they stay visible on top of packed items).
 """
 from __future__ import annotations
 
@@ -45,8 +45,6 @@ def _item_by_id(items: List[Item], eid: int) -> Item | None:
 
 
 def _item_colors(status: str, is_overflow: bool) -> Tuple[str, str]:
-    # Color by analysis verdict so the diagram matches the table.
-    # Unplaced items that still somehow lack a verdict get FAIL red.
     if status in STATUS_FILL:
         return STATUS_FILL[status], STATUS_LINE[status]
     if is_overflow:
@@ -58,10 +56,10 @@ def display_pack(
     items: List[Item], length: float, width: float, gap: float,
     verdict: Dict[int, dict],
 ) -> Tuple[List[Placement], List[Item], PackResult]:
-    """Pack for visualization: fit everything that can; return unplaced as overflow.
+    """Pack for visualization: fit everything that can; return unplaced separately.
 
-    'Overflow' here is a packing outcome (won't fit), not a table status.
-    Unplaced items keep their analysis verdict (FAIL / AMBIGUOUS / …).
+    'Unplaced' is a packing outcome (won't fit), not a table status — those
+    items keep their analysis verdict (FAIL / AMBIGUOUS / …).
     """
     exact = pack_floor(items, length, width, gap)
     if exact.fits:
@@ -91,27 +89,41 @@ def _placement_to_strip(p: Placement, x_offset: float) -> Tuple[float, float, fl
     return x0, y0, x1, y1
 
 
-def _overflow_placement(it: Item, x_offset: float, cursor_along_length: float,
-                        floor_width: float) -> Tuple[Placement, float]:
-    """Fabricate a placement for an unplaced item inside its floor section.
-
-    Prefer orientation that stays within floor width when possible; otherwise
-    use the natural dims (item will visually spill past the outline — still
-    attached to the one trailer, colored red).
-    """
-    # Try shorter side along width first.
+def _orient_for_width(it: Item, floor_width: float) -> Tuple[float, float]:
+    """Return (w along width, h along length), preferring to fit in floor_width."""
     orientations = [
-        (min(it.length, it.width), max(it.length, it.width)),  # w, h
+        (min(it.length, it.width), max(it.length, it.width)),
         (max(it.length, it.width), min(it.length, it.width)),
     ]
-    ow, oh = orientations[0]
-    for cand_w, cand_h in orientations:
-        if cand_w <= floor_width + 1e-9:
-            ow, oh = cand_w, cand_h
-            break
-    # Packer Placement: x along width, y along length, w=width-extent, h=length-extent
-    p = Placement(it.equipment_id, x=0.0, y=cursor_along_length, w=ow, h=oh)
-    return p, cursor_along_length + oh + 2.0
+    for ow, oh in orientations:
+        if ow <= floor_width + 1e-9:
+            return ow, oh
+    return orientations[0]
+
+
+def unplaced_placements(
+    unplaced: List[Item], floor_width: float, gap: float = 2.0,
+) -> List[Placement]:
+    """Stack unplaced items along the WIDTH axis at length=0.
+
+    Two too-long dance items (e.g. 140×48) become two side-by-side strips
+    in the dance section (both starting at the nose) instead of chaining
+    end-to-end into general where packed green boxes cover them.
+    """
+    out: List[Placement] = []
+    cursor_w = 0.0
+    row_y = 0.0  # along length
+    row_h = 0.0
+    for it in unplaced:
+        ow, oh = _orient_for_width(it, floor_width)
+        if cursor_w > 0 and cursor_w + ow > floor_width + 1e-9:
+            row_y += row_h + gap
+            cursor_w = 0.0
+            row_h = 0.0
+        out.append(Placement(it.equipment_id, x=cursor_w, y=row_y, w=ow, h=oh))
+        cursor_w += ow + gap
+        row_h = max(row_h, oh)
+    return out
 
 
 def _draw_box(
@@ -138,21 +150,16 @@ def _draw_box(
     ))
 
 
-def _draw_floor_items(
+def _draw_placements(
     fig: go.Figure, items: List[Item], placements: List[Placement],
-    overflow: List[Item], verdict: Dict[int, dict],
-    x_offset: float, floor_length: float, floor_width: float,
+    verdict: Dict[int, dict], x_offset: float, wont_pack: bool,
 ) -> Tuple[float, float]:
-    """Draw placed + overflow items inside the trailer strip for one floor.
-
-    Returns (min_y, max_y) extents actually drawn (may spill past floor_width).
-    """
-    min_y, max_y = 0.0, floor_width
-
+    min_y, max_y = 0.0, 0.0
+    first = True
     for p in placements:
         eid = p.equipment_id
         status = verdict.get(eid, {}).get("status", "UNKNOWN")
-        fill, line = _item_colors(status, is_overflow=False)
+        fill, line = _item_colors(status, is_overflow=wont_pack)
         it = _item_by_id(items, eid)
         label = it.label if it else str(eid)
         file_L = it.length if it else p.h
@@ -160,27 +167,14 @@ def _draw_floor_items(
         x0, y0, x1, y1 = _placement_to_strip(p, x_offset)
         _draw_box(
             fig, x0, y0, x1, y1, fill, line, label, eid,
-            file_L, file_W, status, p.w, p.h, wont_pack=False,
+            file_L, file_W, status, p.w, p.h, wont_pack=wont_pack,
         )
-        min_y = min(min_y, y0)
-        max_y = max(max_y, y1)
-
-    # Jam unplaced items into this floor section (still inside the one trailer).
-    cursor = 0.0
-    for it in overflow:
-        status = verdict.get(it.equipment_id, {}).get("status", "FAIL")
-        fill, line = _item_colors(status, is_overflow=True)
-        p, cursor = _overflow_placement(it, x_offset, cursor, floor_width)
-        x0, y0, x1, y1 = _placement_to_strip(p, x_offset)
-        # If oh > floor_length the box may spill into the neighboring section —
-        # still one trailer; that spill is the visual signal they don't fit.
-        _draw_box(
-            fig, x0, y0, x1, y1, fill, line, it.label, it.equipment_id,
-            it.length, it.width, status, p.w, p.h, wont_pack=True,
-        )
-        min_y = min(min_y, y0)
-        max_y = max(max_y, y1)
-
+        if first:
+            min_y, max_y = y0, y1
+            first = False
+        else:
+            min_y = min(min_y, y0)
+            max_y = max(max_y, y1)
     return min_y, max_y
 
 
@@ -197,12 +191,10 @@ def render_trailer_figure(
     total_length = dance_geom.length + general_geom.length
     total_width = max(dance_geom.width, general_geom.width)
 
-    # Single outer trailer outline.
     fig.add_shape(
         type="rect", x0=0, y0=0, x1=total_length, y1=total_width,
         line=dict(color="#888", width=2), fillcolor="#fafafa", layer="below",
     )
-    # Subtle dance | general divider (same trailer, two sections).
     fig.add_shape(
         type="line", x0=dance_geom.length, y0=0,
         x1=dance_geom.length, y1=total_width,
@@ -221,10 +213,10 @@ def render_trailer_figure(
         yanchor="bottom",
     )
 
-    dance_placed, dance_overflow, dance_exact = display_pack(
+    dance_placed, dance_unplaced, dance_exact = display_pack(
         dance_items, dance_geom.length, dance_geom.width, gap, verdict,
     )
-    general_placed, general_overflow, general_exact = display_pack(
+    general_placed, general_unplaced, general_exact = display_pack(
         general_items, general_geom.length, general_geom.width, gap, verdict,
     )
     if dance_result is not None:
@@ -232,19 +224,38 @@ def render_trailer_figure(
     if general_result is not None:
         general_exact = general_result
 
-    dmin, dmax = _draw_floor_items(
-        fig, dance_items, dance_placed, dance_overflow, verdict,
-        0.0, dance_geom.length, dance_geom.width,
-    )
-    gmin, gmax = _draw_floor_items(
-        fig, general_items, general_placed, general_overflow, verdict,
-        dance_geom.length, general_geom.length, general_geom.width,
-    )
+    dance_overflow_pl = unplaced_placements(dance_unplaced, dance_geom.width, gap)
+    general_overflow_pl = unplaced_placements(general_unplaced, general_geom.width, gap)
+
+    # Draw packed items first, then unplaced on top so they aren't hidden under
+    # a floor-mate in the neighboring section (e.g. too-long dance item spilling
+    # into general under a green PASS box).
+    extents: List[Tuple[float, float]] = [(0.0, total_width)]
+    if dance_placed:
+        extents.append(_draw_placements(
+            fig, dance_items, dance_placed, verdict, 0.0, wont_pack=False,
+        ))
+    if general_placed:
+        extents.append(_draw_placements(
+            fig, general_items, general_placed, verdict,
+            dance_geom.length, wont_pack=False,
+        ))
+    if dance_overflow_pl:
+        extents.append(_draw_placements(
+            fig, dance_items, dance_overflow_pl, verdict, 0.0, wont_pack=True,
+        ))
+    if general_overflow_pl:
+        extents.append(_draw_placements(
+            fig, general_items, general_overflow_pl, verdict,
+            dance_geom.length, wont_pack=True,
+        ))
+
+    dmin = min(e[0] for e in extents)
+    dmax = max(e[1] for e in extents)
 
     def _floor_caption(name: str, exact: PackResult, unplaced: List[Item]) -> str:
         if exact.fits:
             return f"{name} packs OK"
-        # Summarize by verdict so caption matches the table, not a fake "OVERFLOW" status.
         counts: Dict[str, int] = {}
         for it in unplaced:
             st = verdict.get(it.equipment_id, {}).get("status", "unplaced")
@@ -255,19 +266,19 @@ def render_trailer_figure(
         return f"{name} won't pack"
 
     parts = [
-        _floor_caption("dance", dance_exact, dance_overflow),
-        _floor_caption("general", general_exact, general_overflow),
+        _floor_caption("dance", dance_exact, dance_unplaced),
+        _floor_caption("general", general_exact, general_unplaced),
     ]
     all_ok = dance_exact.fits and general_exact.fits
     fig.add_annotation(
-        x=0, y=min(0.0, dmin, gmin) - 4,
+        x=0, y=min(0.0, dmin) - 4,
         text=("Packed successfully — " if all_ok else "") + " · ".join(parts),
         showarrow=False, xanchor="left", yanchor="top",
         font=dict(size=11, color="#1a7f37" if all_ok else "#cf222e"),
     )
 
-    y_lo = min(0.0, dmin, gmin) - 16
-    y_hi = max(total_width, dmax, gmax) + 14
+    y_lo = min(0.0, dmin) - 16
+    y_hi = max(total_width, dmax) + 14
     x_lo, x_hi = -8, total_length + 8
     x_range = x_hi - x_lo
     y_range = max(y_hi - y_lo, 1.0)
