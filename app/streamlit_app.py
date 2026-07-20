@@ -401,7 +401,7 @@ for tname in sorted(sel_trailers, key=_trailer_sort_key):
             if not dance_tbl.empty:
                 st.dataframe(
                     dance_tbl.style.map(color_status, subset=["status"]),
-                    use_container_width=True, hide_index=True,
+                    width='stretch', hide_index=True,
                 )
             else:
                 st.caption("No equipment on this floor.")
@@ -410,7 +410,7 @@ for tname in sorted(sel_trailers, key=_trailer_sort_key):
             if not general_tbl.empty:
                 st.dataframe(
                     general_tbl.style.map(color_status, subset=["status"]),
-                    use_container_width=True, hide_index=True,
+                    width='stretch', hide_index=True,
                 )
             else:
                 st.caption("No equipment on this floor.")
@@ -422,7 +422,7 @@ for tname in sorted(sel_trailers, key=_trailer_sort_key):
             dance_result=dance_result,
             general_result=general_result,
         )
-        st.plotly_chart(fig, use_container_width=True,
+        st.plotly_chart(fig, width='stretch',
                         key=f"chart_{tname}_{rid}")
 
         for eid in sorted(ids_here):
@@ -514,7 +514,7 @@ fails = equipment_table({e for e in scoped_eids if verdict.get(e, {}).get("statu
 if not fails.empty:
     st.write(f"**{len(fails)}** equipment with stored sizes that contradict a working floor load.")
     st.dataframe(fails.style.map(color_status, subset=["status"]),
-                 use_container_width=True, hide_index=True)
+                 width='stretch', hide_index=True)
     st.download_button("Download good-fail list (CSV)",
                        fails.to_csv(index=False), "good_fail_list_2026.csv", "text/csv")
 else:
@@ -525,14 +525,14 @@ if amb_ids:
     with st.expander(f"Ambiguous ({len(amb_ids)}) — scan the group"):
         amb = equipment_table(amb_ids, verdict)
         st.dataframe(amb.style.map(color_status, subset=["status"]),
-                     use_container_width=True, hide_index=True)
+                     width='stretch', hide_index=True)
 
 unk_ids = {e for e in scoped_eids if verdict.get(e, {}).get("status") == UNKNOWN}
 if unk_ids:
     with st.expander(f"Unknown dims ({len(unk_ids)})"):
         unk = equipment_table(unk_ids, verdict)
         st.dataframe(unk[["equipment_id", "serial", "description", "reason"]],
-                     use_container_width=True, hide_index=True)
+                     width='stretch', hide_index=True)
 
 # ------------------------------------------------------------------ WMS dimension corrections export
 st.subheader("WMS dimension corrections")
@@ -553,7 +553,7 @@ if corr_rows:
         f"**{len(export_df)}** equipment dimension(s) to update in WMS. "
         "Apply these corrected L×W values in the main database."
     )
-    st.dataframe(export_df, use_container_width=True, hide_index=True)
+    st.dataframe(export_df, width='stretch', hide_index=True)
     st.download_button(
         "Download WMS corrections (CSV)",
         export_df.to_csv(index=False),
@@ -570,7 +570,7 @@ else:
 with st.expander("All verification history"):
     records = checklist.list_records()
     if records:
-        st.dataframe(pd.DataFrame(records), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(records), width='stretch', hide_index=True)
     else:
         st.write("Nothing verified yet.")
 
