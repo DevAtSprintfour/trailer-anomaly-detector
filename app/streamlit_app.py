@@ -183,6 +183,19 @@ def status_badge(status: str) -> str:
     )
 
 
+FLOOR_BADGE_COLOR = {FLOOR_DANCE: "#a56b00", FLOOR_GENERAL: "#1568a8"}
+
+
+def floor_badge(floor_key: str) -> str:
+    """Inline HTML badge distinguishing dance vs general floor."""
+    color = FLOOR_BADGE_COLOR.get(floor_key, "#6e7781")
+    return (
+        f'<span style="color:{color};font-weight:700;padding:0.1rem 0.45rem;'
+        f'border:1px solid {color};border-radius:4px;font-size:0.85em">'
+        f"{floor_key} floor</span>"
+    )
+
+
 def effective_dims(eid):
     """Return (L, W) after applying any user dimension correction."""
     if eid in dim_overrides:
@@ -376,12 +389,31 @@ for tname in sorted(sel_trailers, key=_trailer_sort_key):
         dance_result = pack_floor(dance_items, dance_fg.length, dance_fg.width, gap)
         general_result = pack_floor(general_items, general_fg.length, general_fg.width, gap)
 
-        ids_here = {it.equipment_id for it in dance_items} | {it.equipment_id for it in general_items}
-        tbl = equipment_table(ids_here, verdict)
-        st.dataframe(
-            tbl.style.map(color_status, subset=["status"]),
-            use_container_width=True, hide_index=True,
-        )
+        dance_ids = {it.equipment_id for it in dance_items}
+        general_ids = {it.equipment_id for it in general_items}
+        ids_here = dance_ids | general_ids
+
+        dance_tbl = equipment_table(dance_ids, verdict)
+        general_tbl = equipment_table(general_ids, verdict)
+        tbl_l, tbl_r = st.columns(2)
+        with tbl_l:
+            st.markdown(f"**Dance floor** ({len(dance_ids)})")
+            if not dance_tbl.empty:
+                st.dataframe(
+                    dance_tbl.style.map(color_status, subset=["status"]),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.caption("No equipment on this floor.")
+        with tbl_r:
+            st.markdown(f"**General floor** ({len(general_ids)})")
+            if not general_tbl.empty:
+                st.dataframe(
+                    general_tbl.style.map(color_status, subset=["status"]),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.caption("No equipment on this floor.")
 
         fig = render_trailer_figure(
             dance_fg, dance_items,
@@ -407,7 +439,8 @@ for tname in sorted(sel_trailers, key=_trailer_sort_key):
             cur_L, cur_W = dim_overrides.get(eid, (orig_L, orig_W))
             desc = meta["equipment_desc"] if meta is not None else eid
             st.markdown(
-                f"**#{eid}** — {desc} · {status_badge(v['status'])}",
+                f"**#{eid}** — {desc} · {status_badge(v['status'])} · "
+                f"{floor_badge(floor_key)}",
                 unsafe_allow_html=True,
             )
 

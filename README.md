@@ -34,13 +34,12 @@ trailer-anomaly/
 ## Run
 
 ```bash
-cd trailer-anomaly
-python3 -m venv .venv && source .venv/bin/activate
-pip install streamlit pandas plotly
-streamlit run app/streamlit_app.py
+cd trailer-anomaly-detector
+uv sync
+uv run streamlit run app/streamlit_app.py
 ```
 
-Open the local URL Streamlit prints. To run the tests: `python app/test_logic.py`.
+Open the local URL Streamlit prints. To run the tests: `uv run python app/test_logic.py`.
 
 ## How it works
 - **Premise**: load sheets are ground truth. Stored WMS dims are tested against them.

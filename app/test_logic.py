@@ -112,6 +112,30 @@ df = mk([row(8, 9, "T-8", "Cup", 1, 900, 120, 90, desc="wide-but-ok")])
 v = analyze(df, gap=2, geom={}, cross_reference=True)
 check("lone 90-wide on dance floor -> PASS", v[900]["status"] == PASS)
 
+# --- Cross-race isolation must not depend on floor iteration order:
+#     item 1000 rides on TWO floors, both general, with the SAME stored
+#     dims (400x90) throughout:
+#       Floor A (race 10): 1000 + 1001, symmetric overflow — ambiguous
+#         unless 1000 is already known-bad.
+#       Floor B (race 11): 1000 + two small mates (1002, 1003) — pairwise
+#         leave-one-out proves 1000 the sole resolver, standalone (no
+#         cross-race info needed).
+#     Floor A is inserted first, so a single forward pass processes A
+#     before B proves 1000 guilty, stranding 1001 as AMBIGUOUS. A
+#     fixed-point pass must re-examine A afterward and clear 1001.
+df = mk([
+    row(10, 20, "T-10", "Cup", 5, 1000, 400, 90, desc="repeat-offender"),
+    row(10, 20, "T-10", "Cup", 7, 1001, 400, 90, desc="innocent-mate"),
+    row(11, 21, "T-11", "Cup", 5, 1000, 400, 90, desc="repeat-offender"),
+    row(11, 21, "T-11", "Cup", 7, 1002, 100, 90, desc="small-a"),
+    row(11, 21, "T-11", "Cup", 9, 1003, 100, 90, desc="small-b"),
+])
+v = analyze(df, gap=2, geom={}, cross_reference=True)
+check("order-independent cross-race: repeat offender stays FAIL", v[1000]["status"] == FAIL)
+check("order-independent cross-race: innocent mate cleared to PASS", v[1001]["status"] == PASS)
+check("order-independent cross-race: small mates PASS",
+      v[1002]["status"] == PASS and v[1003]["status"] == PASS)
+
 # --- Trailer category classification ---
 from trailer_categories import (
     classify_trailer, DEFAULT_CATEGORY_GEOM,

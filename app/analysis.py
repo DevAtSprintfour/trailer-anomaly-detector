@@ -138,63 +138,81 @@ def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
                 )
 
     # 2) Floor packing overflow + leave-one-out blame.
+    # tolerance widens the effective floor the same way for both the pack
+    # check and its leave-one-out resolver check, mirroring the width check.
+    cap_len = {f.floor: f.cap_length + tolerance for f in floors}
+    cap_wid = {f.floor: f.cap_width + tolerance for f in floors}
     pack_bad: Dict[int, dict] = {}
     ambiguous: set = set()
     known_bad = set(width_bad)
 
-    for f in floors:
-        if len(f.items) == 0:
-            continue
-        # Verified items are treated as ground truth: exclude them from
-        # blame candidacy so they never re-enter FAIL/AMBIGUOUS below, and
-        # so their floor-mates get correctly re-blamed without them.
-        blameable = [it for it in f.items if it.equipment_id not in verified]
-        if len(blameable) == 0:
-            continue
-        result = pack_floor(blameable, f.cap_length, f.cap_width, gap)
-        if result.fits:
-            continue
+    # Cross-race isolation ("a known-bad item exonerates floor-mates") needs
+    # more than one pass: a floor visited early may only resolve once a later
+    # floor proves one of its items bad. Iterate to a fixed point so the
+    # result doesn't depend on floor iteration order.
+    changed = True
+    while changed:
+        changed = False
+        ambiguous = set()
+        for f in floors:
+            if len(f.items) == 0:
+                continue
+            # Verified items are treated as ground truth: exclude them from
+            # blame candidacy so they never re-enter FAIL/AMBIGUOUS below, and
+            # so their floor-mates get correctly re-blamed without them.
+            blameable = [it for it in f.items if it.equipment_id not in verified]
+            if len(blameable) == 0:
+                continue
+            cl, cw = cap_len[f.floor], cap_wid[f.floor]
+            result = pack_floor(blameable, cl, cw, gap)
+            if result.fits:
+                continue
 
-        resolvers = []
-        for it in blameable:
-            rest = [x for x in blameable if x.equipment_id != it.equipment_id]
-            if _floor_fits(rest, f.cap_length, f.cap_width, gap):
-                resolvers.append(it.equipment_id)
-
-        # Prefer area overflow; fall back to a nominal 1.0 so UI has a number.
-        overflow = round(result.area_overflow, 1) if result.area_overflow > 0 else 1.0
-        info = dict(
-            floor=f.floor, race=f.race_id, trailer=f.trailer_name,
-            overflow=overflow, n_items=len(blameable),
-            cap_length=f.cap_length, cap_width=f.cap_width,
-            detail=result.detail,
-        )
-        known_resolvers = [e for e in resolvers if e in known_bad]
-
-        if not cross_reference:
+            resolvers = []
             for it in blameable:
-                ambiguous.add(it.equipment_id)
-        elif len(blameable) == 1:
-            eid = blameable[0].equipment_id
-            # alone and doesn't pack → already caught as width, or too long
-            if eid not in width_bad:
+                rest = [x for x in blameable if x.equipment_id != it.equipment_id]
+                if _floor_fits(rest, cl, cw, gap):
+                    resolvers.append(it.equipment_id)
+
+            # Prefer area overflow; fall back to a nominal 1.0 so UI has a number.
+            overflow = round(result.area_overflow, 1) if result.area_overflow > 0 else 1.0
+            info = dict(
+                floor=f.floor, race=f.race_id, trailer=f.trailer_name,
+                overflow=overflow, n_items=len(blameable),
+                cap_length=f.cap_length, cap_width=f.cap_width,
+                detail=result.detail,
+            )
+            known_resolvers = [e for e in resolvers if e in known_bad]
+
+            if not cross_reference:
+                for it in blameable:
+                    ambiguous.add(it.equipment_id)
+            elif len(blameable) == 1:
+                eid = blameable[0].equipment_id
+                # alone and doesn't pack → already caught as width, or too long
+                if eid not in width_bad:
+                    cur = pack_bad.get(eid)
+                    if cur is None or overflow > cur["overflow"]:
+                        pack_bad[eid] = info
+                    if eid not in known_bad:
+                        known_bad.add(eid)
+                        changed = True
+            elif len(resolvers) == 1:
+                eid = resolvers[0]
                 cur = pack_bad.get(eid)
                 if cur is None or overflow > cur["overflow"]:
                     pack_bad[eid] = info
-        elif len(resolvers) == 1:
-            eid = resolvers[0]
-            cur = pack_bad.get(eid)
-            if cur is None or overflow > cur["overflow"]:
-                pack_bad[eid] = info
-            known_bad.add(eid)
-        elif len(known_resolvers) == 1:
-            eid = known_resolvers[0]
-            cur = pack_bad.get(eid)
-            if cur is None or overflow > cur["overflow"]:
-                pack_bad[eid] = info
-        else:
-            for it in blameable:
-                ambiguous.add(it.equipment_id)
+                if eid not in known_bad:
+                    known_bad.add(eid)
+                    changed = True
+            elif len(known_resolvers) == 1:
+                eid = known_resolvers[0]
+                cur = pack_bad.get(eid)
+                if cur is None or overflow > cur["overflow"]:
+                    pack_bad[eid] = info
+            else:
+                for it in blameable:
+                    ambiguous.add(it.equipment_id)
 
     definite = set(width_bad) | set(pack_bad)
     ambiguous -= definite
