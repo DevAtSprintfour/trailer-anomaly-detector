@@ -1,4 +1,4 @@
-"""Trailer name -> category classification, and per-category floor geometry.
+"""Trailer name -> category classification, and per-category geometry.
 
 Trailer names follow a handful of patterns (see data/trailers_2026.csv):
   T-NN       -> standard T-series (e.g. T-02, T-07, T-38)
@@ -6,13 +6,13 @@ Trailer names follow a handful of patterns (see data/trailers_2026.csv):
   F-NN       -> F-series (e.g. F-10)
   everything else (e.g. "01- Big", "03-Awn") -> Other
 
-Categories exist so each pattern can have its own dance/general floor
-dimensions instead of one global size for every trailer.
+Categories exist so each pattern can have its own container geometry
+(dance length / general length / interior width) instead of one global size.
 """
+
 from __future__ import annotations
 
 import re
-from typing import Dict
 
 from floor_geom import DEFAULT_GEOM
 
@@ -40,8 +40,5 @@ def classify_trailer(name: str) -> str:
     return CATEGORY_OTHER
 
 
-# Every category defaults to today's global dance/general size until a user
-# tunes it per category in the sidebar.
-DEFAULT_CATEGORY_GEOM: Dict[str, dict] = {
-    cat: dict(DEFAULT_GEOM) for cat in ALL_CATEGORIES
-}
+# Every category defaults to the global container size until a user tunes it.
+DEFAULT_CATEGORY_GEOM: dict[str, dict] = {cat: dict(DEFAULT_GEOM) for cat in ALL_CATEGORIES}

@@ -1,0 +1,40 @@
+# Pre-commit hooks for the trailer anomaly detector.
+#   Install once:  uv run pre-commit install
+#   Run manually:  uv run pre-commit run --all-files
+repos:
+  # Keep uv.lock in sync with pyproject.toml.
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.9.7
+    hooks:
+      - id: uv-lock
+
+  # Lint, format, type-check and test using the project's pinned tools (via uv).
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: ty
+        name: ty type check
+        entry: uv run ty check app/
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: unit-tests
+        name: unit tests
+        entry: uv run python app/test_logic.py
+        language: system
+        types: [python]
+        pass_filenames: false

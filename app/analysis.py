@@ -1,20 +1,25 @@
 """Analysis engine — LOAD SHEETS ARE THE SOURCE OF TRUTH.
 
-Premise: if equipment appeared on a load sheet floor, it DID physically fit on
-that floor. We do NOT trust stored WMS dimensions. We pool every item that rode
-on the dance floor (slots 1–2) into one bin and every item on the general floor
-(slots 3–10) into another, then 2D-pack each bin. If stored sizes cannot pack
-into a floor that worked in reality, at least one stored size is wrong.
+Premise: if equipment appeared on a trailer, it DID physically fit. We do NOT
+trust stored WMS dimensions. For each (race, trailer) we build ONE container
+(dance chamber + general chamber, split by the exclusion line) and 2D-pack every
+item with the CP-SAT engine in :mod:`cp_packer`. Dance items (slots 1-2) are
+pinned to the left chamber, general items (slots 3-10) to the right. If the
+stored sizes cannot pack into a trailer that worked in reality, at least one
+stored size is wrong.
 
-Blame: leave-one-out + cross-race isolation when possible; else AMBIGUOUS.
+Blame unit is the whole (race, trailer): leave-one-out + cross-race isolation
+when possible; else AMBIGUOUS.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+
 import pandas as pd
 
-from floor_geom import Item, floor_for_slot, floor_geometry, pack_floor
+from cp_packer import ContainerSpec, CpPacker, PackItem
+from floor_geom import FLOOR_DANCE, FLOOR_GENERAL, container_for_geom, floor_for_slot
 from trailer_categories import classify_trailer
 
 PASS = "PASS"
@@ -23,255 +28,231 @@ AMBIGUOUS = "AMBIGUOUS"
 UNKNOWN = "UNKNOWN"
 RESOLVED = "RESOLVED"  # manually verified by a user despite an anomaly flag
 
+# One shared packer so its solve cache survives across Streamlit reruns and
+# across the many near-identical leave-one-out solves within a single analyze().
+_PACKER = CpPacker(time_limit=5.0)
+
 
 @dataclass
-class UsedFloor:
+class TrailerFloor:
+    """All equipment on one (race, trailer), packed as a single container."""
+
     race_id: int
     trailer_id: int
     trailer_name: str
     trailer_category: str
     view: str
-    floor: str                 # 'dance' | 'general'
-    cap_length: float
-    cap_width: float
-    items: List[Item] = field(default_factory=list)
+    container: ContainerSpec
+    items: list[PackItem] = field(default_factory=list)
     n_total: int = 0
     has_missing: bool = False
 
+    def items_on(self, side: str) -> list[PackItem]:
+        return [it for it in self.items if it.side == side]
 
-def build_used_floors(df: pd.DataFrame, geom: dict,
-                       category_geom: Dict[str, dict] = None,
-                       dim_overrides: Dict[int, Tuple[float, float]] = None,
-                       ) -> List[UsedFloor]:
-    """Group load-sheet rows into (race, trailer, floor) bins.
 
-    geom is the flat legacy fallback (dance/general dict) used when a
-    trailer's category has no entry in category_geom. category_geom maps
-    trailer_category -> per-category dance/general dict.
-    dim_overrides maps equipment_id -> (corrected_length, corrected_width)
-    and replaces stored WMS dims when present.
+def build_used_floors(
+    df: pd.DataFrame,
+    geom: dict,
+    category_geom: dict[str, dict] | None = None,
+    dim_overrides: dict[int, tuple[float, float]] | None = None,
+    padding: float = 2.0,
+) -> list[TrailerFloor]:
+    """Group load-sheet rows into one container per (race, trailer).
+
+    ``geom`` is the flat fallback used when a trailer's category has no entry
+    in ``category_geom``. ``dim_overrides`` maps equipment_id -> (L, W) and
+    replaces stored WMS dims when present.
     """
     cat_geom = category_geom or {}
     overrides = dim_overrides or {}
     work = df.copy()
     work["floor"] = work["slot"].map(floor_for_slot)
-    keys = ["race_id", "trailer_id", "trailer_name", "trailer_view", "floor"]
-    floors: List[UsedFloor] = []
-    for (race, tid, tname, view, floor), g in work.groupby(keys, sort=False):
+    keys = ["race_id", "trailer_id", "trailer_name", "trailer_view"]
+    floors: list[TrailerFloor] = []
+    for (race, tid, tname, view), g in work.groupby(keys, sort=False):
         category = classify_trailer(str(tname))
         resolved_geom = cat_geom.get(category, geom)
-        fg = floor_geometry(str(floor), resolved_geom)
-        items, missing = [], False
-        # One row per equipment_id on this floor (dedupe if multi-slot noise)
-        seen = set()
+        container = container_for_geom(resolved_geom, padding)
+        items, missing, seen = [], False, set()
         for _, r in g.iterrows():
             eid = int(r["equipment_id"]) if pd.notna(r["equipment_id"]) else None
             if eid is None or eid in seen:
                 continue
             seen.add(eid)
+            side = floor_for_slot(r["slot"])
+            label = str(r.get("equipment_desc") or eid)
             if eid in overrides:
                 L, W = overrides[eid]
-                items.append(Item(eid, float(L), float(W),
-                                  str(r.get("equipment_desc") or eid)))
+                items.append(PackItem(eid, float(L), float(W), side, label))
                 continue
-            usable = (not r["dims_missing"] and pd.notna(r["eq_length"])
-                      and pd.notna(r["eq_width"]) and r["eq_length"] > 0
-                      and r["eq_width"] > 0)
+            usable = (
+                not r["dims_missing"]
+                and pd.notna(r["eq_length"])
+                and pd.notna(r["eq_width"])
+                and r["eq_length"] > 0
+                and r["eq_width"] > 0
+            )
             if usable:
-                items.append(Item(eid, float(r["eq_length"]), float(r["eq_width"]),
-                                  str(r.get("equipment_desc") or eid)))
+                items.append(
+                    PackItem(eid, float(r["eq_length"]), float(r["eq_width"]), side, label)
+                )
             else:
                 missing = True
-        floors.append(UsedFloor(
-            int(race), int(tid), str(tname), category, str(view), str(floor),
-            fg.length, fg.width, items, len(seen), missing,
-        ))
+        floors.append(
+            TrailerFloor(
+                int(race),
+                int(tid),
+                str(tname),
+                category,
+                str(view),
+                container,
+                items,
+                len(seen),
+                missing,
+            )
+        )
     return floors
 
 
-def _floor_fits(items: List[Item], cap_len: float, cap_wid: float, gap: float) -> bool:
-    return pack_floor(items, cap_len, cap_wid, gap).fits
+def analyze(
+    df: pd.DataFrame,
+    gap: float,
+    geom: dict,
+    tolerance: float = 0.0,
+    cross_reference: bool = True,
+    category_geom: dict[str, dict] | None = None,
+    verified: set | None = None,
+    dim_overrides: dict[int, tuple[float, float]] | None = None,
+    packer: CpPacker | None = None,
+) -> dict[int, dict]:
+    """Return {equipment_id: verdict dict} from per-floor overflow.
 
+    Each floor of every (race, trailer) is packed against its REAL length. Items
+    that overflow their floor are flagged by floor severity:
 
-def analyze(df: pd.DataFrame, gap: float, geom: dict, tolerance: float = 0.0,
-            cross_reference: bool = True, category_geom: Dict[str, dict] = None,
-            verified: Optional[set] = None,
-            dim_overrides: Dict[int, Tuple[float, float]] = None,
-            ) -> Dict[int, dict]:
-    """Return {equipment_id: verdict dict} using floor-level 2D packing.
+      - dance-floor overflow  -> AMBIGUOUS
+      - general-floor overflow -> FAIL
 
-    verified: equipment_ids the user has manually confirmed correct — excluded
-    from ambiguous-blame candidacy and forced to RESOLVED status.
-    dim_overrides: equipment_id -> (L, W) replacing stored WMS dims for packing.
+    ``verified`` equipment_ids are treated as ground truth (RESOLVED).
+    ``dim_overrides`` replaces stored dims. ``tolerance`` widens each floor.
+    ``cross_reference`` is accepted for API compatibility (unused).
     """
-    floors = build_used_floors(df, geom, category_geom, dim_overrides)
+    pk = packer or _PACKER
+    floors = build_used_floors(df, geom, category_geom, dim_overrides, padding=gap)
     verified = set(verified or ())
     overrides = dim_overrides or {}
 
-    appears: Dict[int, List[UsedFloor]] = {}
+    appears: dict[int, list[TrailerFloor]] = {}
     for f in floors:
         for it in f.items:
             appears.setdefault(it.equipment_id, []).append(f)
 
     missing_ids = set(df.loc[df["dims_missing"], "equipment_id"].dropna().astype(int))
-    # An override supplies dims, so the equipment is no longer "missing".
-    missing_ids -= set(overrides)
+    missing_ids -= set(overrides)  # an override supplies dims
     eq_ids = set(df["equipment_id"].dropna().astype(int))
 
-    # 1) Single-item width: shorter side > floor width → impossible.
-    width_bad: Dict[int, dict] = {}
+    # Overflow per floor: pack each chamber against its real length; the items
+    # that don't fit are the overflow, flagged by floor severity.
+    general_bad: dict[int, dict] = {}  # eid -> evidence  (FAIL)
+    dance_bad: dict[int, dict] = {}  # eid -> evidence  (AMBIGUOUS)
 
-    def flag_width(eid, excess, **info):
-        cur = width_bad.get(eid)
-        if cur is None or excess > cur["excess"]:
-            width_bad[eid] = dict(excess=round(excess, 1), **info)
+    def _floor_len(f: TrailerFloor, side: str) -> float:
+        base = f.container.dance_length if side == FLOOR_DANCE else f.container.general_length
+        return base + tolerance
 
     for f in floors:
-        for it in f.items:
-            short = min(it.length, it.width)
-            if short > f.cap_width + tolerance:
-                flag_width(
-                    it.equipment_id, short - f.cap_width,
-                    floor=f.floor, race=f.race_id, trailer=f.trailer_name,
-                    cap_width=f.cap_width, stored_short=short,
-                    kind_detail=f"wider than the {f.floor} floor width",
-                )
-
-    # 2) Floor packing overflow + leave-one-out blame.
-    # tolerance widens the effective floor the same way for both the pack
-    # check and its leave-one-out resolver check, mirroring the width check.
-    cap_len = {f.floor: f.cap_length + tolerance for f in floors}
-    cap_wid = {f.floor: f.cap_width + tolerance for f in floors}
-    pack_bad: Dict[int, dict] = {}
-    ambiguous: set = set()
-    known_bad = set(width_bad)
-
-    # Cross-race isolation ("a known-bad item exonerates floor-mates") needs
-    # more than one pass: a floor visited early may only resolve once a later
-    # floor proves one of its items bad. Iterate to a fixed point so the
-    # result doesn't depend on floor iteration order.
-    changed = True
-    while changed:
-        changed = False
-        ambiguous = set()
-        for f in floors:
-            if len(f.items) == 0:
+        for side, target in ((FLOOR_DANCE, dance_bad), (FLOOR_GENERAL, general_bad)):
+            side_items = [
+                it for it in f.items if it.side == side and it.equipment_id not in verified
+            ]
+            if not side_items:
                 continue
-            # Verified items are treated as ground truth: exclude them from
-            # blame candidacy so they never re-enter FAIL/AMBIGUOUS below, and
-            # so their floor-mates get correctly re-blamed without them.
-            blameable = [it for it in f.items if it.equipment_id not in verified]
-            if len(blameable) == 0:
-                continue
-            cl, cw = cap_len[f.floor], cap_wid[f.floor]
-            result = pack_floor(blameable, cl, cw, gap)
-            if result.fits:
-                continue
-
-            resolvers = []
-            for it in blameable:
-                rest = [x for x in blameable if x.equipment_id != it.equipment_id]
-                if _floor_fits(rest, cl, cw, gap):
-                    resolvers.append(it.equipment_id)
-
-            # Prefer area overflow; fall back to a nominal 1.0 so UI has a number.
-            overflow = round(result.area_overflow, 1) if result.area_overflow > 0 else 1.0
-            info = dict(
-                floor=f.floor, race=f.race_id, trailer=f.trailer_name,
-                overflow=overflow, n_items=len(blameable),
-                cap_length=f.cap_length, cap_width=f.cap_width,
-                detail=result.detail,
+            res = pk.pack_floor(
+                side_items,
+                _floor_len(f, side),
+                f.container.width + tolerance,
+                gap,
+                best_effort=True,
             )
-            known_resolvers = [e for e in resolvers if e in known_bad]
+            for it in res.unplaced:
+                info = dict(
+                    floor=side,
+                    race=f.race_id,
+                    trailer=f.trailer_name,
+                    cap_length=_floor_len(f, side),
+                    cap_width=f.container.width,
+                )
+                target.setdefault(it.equipment_id, info)
 
-            if not cross_reference:
-                for it in blameable:
-                    ambiguous.add(it.equipment_id)
-            elif len(blameable) == 1:
-                eid = blameable[0].equipment_id
-                # alone and doesn't pack → already caught as width, or too long
-                if eid not in width_bad:
-                    cur = pack_bad.get(eid)
-                    if cur is None or overflow > cur["overflow"]:
-                        pack_bad[eid] = info
-                    if eid not in known_bad:
-                        known_bad.add(eid)
-                        changed = True
-            elif len(resolvers) == 1:
-                eid = resolvers[0]
-                cur = pack_bad.get(eid)
-                if cur is None or overflow > cur["overflow"]:
-                    pack_bad[eid] = info
-                if eid not in known_bad:
-                    known_bad.add(eid)
-                    changed = True
-            elif len(known_resolvers) == 1:
-                eid = known_resolvers[0]
-                cur = pack_bad.get(eid)
-                if cur is None or overflow > cur["overflow"]:
-                    pack_bad[eid] = info
-            else:
-                for it in blameable:
-                    ambiguous.add(it.equipment_id)
-
-    definite = set(width_bad) | set(pack_bad)
-    ambiguous -= definite
-
-    verdict: Dict[int, dict] = {}
+    verdict: dict[int, dict] = {}
     for eid in eq_ids:
         eid = int(eid)
         n_floors = len(appears.get(eid, []))
         if eid in verified:
             verdict[eid] = dict(
-                status=RESOLVED, unique=False, kind="verified",
+                status=RESOLVED,
+                unique=False,
+                kind="verified",
                 reason="manually verified by a user as correct despite an anomaly flag",
-                excess_in=0.0, worst_floor=None, floors_used=n_floors,
+                excess_in=0.0,
+                worst_floor=None,
+                floors_used=n_floors,
             )
-        elif eid in width_bad:
-            wb = width_bad[eid]
-            floor = wb.get("floor", "floor")
+        elif eid in general_bad:
+            gb = general_bad[eid]
             verdict[eid] = dict(
-                status=FAIL, unique=True, kind="width",
-                reason=(f"stored width {wb['stored_short']:.0f}in can't fit the "
-                        f"{floor} floor (width {wb['cap_width']:.0f}in), but the "
-                        f"load sheet shows it fit → stored width is wrong"),
-                excess_in=wb["excess"],
-                worst_floor=wb, floors_used=n_floors,
+                status=FAIL,
+                unique=True,
+                kind="general_overflow",
+                reason=(
+                    f"on trailer {gb['trailer']} this item overflows the general "
+                    f"floor ({gb['cap_length']:.0f}×{gb['cap_width']:.0f}in), but the "
+                    f"load sheet shows it fit -> its stored size is wrong"
+                ),
+                excess_in=None,
+                worst_floor=gb,
+                floors_used=n_floors,
             )
-        elif eid in pack_bad:
-            pb = pack_bad[eid]
+        elif eid in dance_bad:
+            db = dance_bad[eid]
             verdict[eid] = dict(
-                status=FAIL, unique=True, kind="pack",
-                reason=(f"on the {pb['floor']} floor the stored sizes cannot 2D-pack "
-                        f"into {pb['cap_length']:.0f}×{pb['cap_width']:.0f}in and only "
-                        f"this item's removal resolves it, but the load sheet shows "
-                        f"the set fit → its stored size is wrong"),
-                excess_in=pb["overflow"],
-                worst_floor=pb, floors_used=n_floors,
-            )
-        elif eid in ambiguous:
-            verdict[eid] = dict(
-                status=AMBIGUOUS, unique=False, kind="group",
-                reason=("stored sizes of a shared floor overflow but blame can't "
-                        "be pinned to one item"),
-                excess_in=None, worst_floor=None, floors_used=n_floors,
+                status=AMBIGUOUS,
+                unique=False,
+                kind="dance_overflow",
+                reason=(
+                    f"on trailer {db['trailer']} this item overflows the dance "
+                    f"floor ({db['cap_length']:.0f}×{db['cap_width']:.0f}in) — "
+                    f"dance-floor overflow is treated as ambiguous"
+                ),
+                excess_in=None,
+                worst_floor=db,
+                floors_used=n_floors,
             )
         elif eid in missing_ids:
             verdict[eid] = dict(
-                status=UNKNOWN, unique=False, kind="missing",
+                status=UNKNOWN,
+                unique=False,
+                kind="missing",
                 reason="missing/zero stored dimensions — cannot verify against load sheets",
-                excess_in=None, worst_floor=None, floors_used=n_floors,
+                excess_in=None,
+                worst_floor=None,
+                floors_used=n_floors,
             )
         else:
             verdict[eid] = dict(
-                status=PASS, unique=False, kind="consistent",
-                reason="stored dimensions are consistent with every floor load sheet it appears in",
-                excess_in=0.0, worst_floor=None, floors_used=n_floors,
+                status=PASS,
+                unique=False,
+                kind="consistent",
+                reason="stored dimensions are consistent with every trailer load sheet it appears in",
+                excess_in=0.0,
+                worst_floor=None,
+                floors_used=n_floors,
             )
     return verdict
 
 
-def summarize(verdict: Dict[int, dict]) -> Dict[str, int]:
+def summarize(verdict: dict[int, dict]) -> dict[str, int]:
     counts = {PASS: 0, FAIL: 0, AMBIGUOUS: 0, UNKNOWN: 0, RESOLVED: 0}
     for v in verdict.values():
         counts[v["status"]] += 1

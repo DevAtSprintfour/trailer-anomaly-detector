@@ -1,10 +1,16 @@
 # Trailer Floor Anomaly Detector (2026 season)
 
 Flags equipment whose **stored dimensions are likely wrong**. Premise: the 2026 load
-sheet is **trusted** — equipment that rode on a trailer floor *did* fit. Slot numbers
-only classify **dance floor** (1–2) vs **general floor** (3–10). Each floor is one
-rectangle; we 2D-pack stored sizes into it. If they cannot pack, the stored dims are
-the suspect → pass/fail list for manual scanner verification.
+sheet is **trusted** — equipment that rode on a trailer *did* fit. Slot numbers only
+classify **dance floor** (1–2) vs **general floor** (3–10). Each trailer is **one
+continuous container** with a *soft* exclusion line at `x = dance_length`: dance items
+anchor at the front, general items behind. We 2D-pack the stored sizes into it with an
+**exact OR-Tools CP-SAT solve** (harness gap between items only). Each floor is packed
+against its real length; an item that doesn't fit its floor is an overflow → its stored
+dims are the suspect. Dance-floor overflow is flagged **ambiguous**, general-floor
+overflow **failed** → pass/fail list for manual scanner verification.
+
+The packing model is ported from `Champion/anomaly-detection/plot.py`.
 
 ## Layout
 ```
@@ -17,11 +23,12 @@ trailer-anomaly/
 │   ├── slots_2026.csv        slot occupancy (reference)
 │   └── checklist.db          local SQLite verification state (gitignored)
 ├── app/                   the analyzer
-│   ├── floor_geom.py         floor dims + 2D packer (rotation, gaps)
-│   ├── analysis.py           floor-level engine + blame isolation
+│   ├── cp_packer.py          OR-Tools CP-SAT container packer + AnomalyReport
+│   ├── floor_geom.py         slot->side classification + ContainerSpec builder
+│   ├── analysis.py           per-(race,trailer) engine + blame isolation
 │   ├── trailer_categories.py trailer name -> category classification + per-category geometry
 │   ├── checklist_store.py    SQLite-backed equipment verification store
-│   ├── packing_viz.py        Plotly packing diagram renderer
+│   ├── packing_viz.py        matplotlib packing diagram renderer (TrailerRenderer)
 │   ├── test_logic.py         unit tests
 │   └── streamlit_app.py      the UI
 └── docs/DESIGN.md         full design + locked decisions
@@ -41,23 +48,35 @@ uv run streamlit run app/streamlit_app.py
 
 Open the local URL Streamlit prints. To run the tests: `uv run python app/test_logic.py`.
 
+### Dev tooling
+- **Lint + format**: `uv run ruff check` and `uv run ruff format`.
+- **Type check**: `uv run ty check app/`.
+- **Pre-commit**: `uv run pre-commit install` (runs ruff, ty, tests, and `uv-lock` on
+  every commit); run manually with `uv run pre-commit run --all-files`.
+
 ## How it works
 - **Premise**: load sheets are ground truth. Stored WMS dims are tested against them.
-- **Two floors**: dance (129×98 in) and general (483×98 in) by default. Trailers are
-  classified into categories by name pattern (`T-Series`, `T-Series Top`, `F-Series`,
-  `Other` — see `app/trailer_categories.py`), and each category's floor dimensions are
-  independently tunable in the sidebar. Items from slots 1–2 pool into dance; slots
-  3–10 into general — per race + trailer.
-- **Packing**: MaxRects 2D packing with per-item 90° rotation and a harness gap.
-- **Buckets**: `PASS` · `FAIL` (unique blame) · `AMBIGUOUS` · `UNKNOWN` · `RESOLVED`
-  (manually verified — excluded from blame candidacy on the next reprocess).
-- **Blame**: leave-one-out + cross-race isolation when possible.
+- **One container per trailer**: a `dance_length + general_length` × `width` rectangle
+  (default `129 + 483` × `98` in) with a **soft** exclusion line at `x = dance_length`.
+  Dance items (slots 1–2) are anchored at the nose but may extend past the line;
+  general items (slots 3–10) start behind it. Trailers are classified into categories by
+  name pattern (`T-Series`, `T-Series Top`, `F-Series`, `Other` — see
+  `app/trailer_categories.py`), each with independently tunable dimensions in the sidebar.
+- **Packing**: exact OR-Tools CP-SAT solve — each floor packed against its **real length**
+  (dance 129, general 483), 90° rotation, harness gap **between items only** (never against
+  walls, so a floor-length item fits). An item that doesn't fit its floor is an *overflow*.
+- **Overflow severity by floor**: **dance-floor overflow → AMBIGUOUS**, **general-floor
+  overflow → FAIL**. (Dance items are often longer than the 129-in dance floor, so dance
+  overflow/ambiguous is common; widen a category's floor in the sidebar to clear it.)
+- **Buckets**: `PASS` · `FAIL` (general-floor overflow) · `AMBIGUOUS` (dance-floor
+  overflow) · `UNKNOWN` (missing dims) · `RESOLVED` (manually verified).
 - **UI**: multi-select races and trailers (all selected by default); changing the
   selection **reprocesses** analysis on exactly that subset rather than filtering a
   season-wide result. Trailer options stay in sync with the race selection. Each
   selected trailer is a lazily-expandable row showing fail/ambiguous counts; expanding
-  it shows the equipment table and a combined Plotly packing diagram (dance + general
-  floor) per race, plus checkboxes to mark equipment as manually verified.
+  it shows the equipment table and a combined matplotlib packing diagram (one
+  container: dance + general chambers) per race, plus checkboxes to mark equipment as
+  manually verified.
 
 ## Data sources
 The committed `data/*.csv` were produced from two internal databases:

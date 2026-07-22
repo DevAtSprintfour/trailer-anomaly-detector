@@ -7,11 +7,10 @@ Dimension corrections: override stored WMS L×W for an equipment_id. These
 feed reprocessing immediately and export as a downloadable list of WMS
 changes. Persisted at data/checklist.db.
 """
+
 from __future__ import annotations
 
 import sqlite3
-from typing import Dict, List, Optional, Set, Tuple
-
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS verification (
@@ -50,8 +49,9 @@ class ChecklistStore:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def mark_verified(self, equipment_id: int, race_id: int, trailer_id: int,
-                      floor: str, note: str = "") -> None:
+    def mark_verified(
+        self, equipment_id: int, race_id: int, trailer_id: int, floor: str, note: str = ""
+    ) -> None:
         conn = self._connect()
         try:
             conn.execute(
@@ -64,16 +64,20 @@ class ChecklistStore:
         finally:
             conn.close()
 
-    def unmark_verified(self, equipment_id: int, race_id: int = None,
-                        trailer_id: int = None, floor: str = None) -> None:
+    def unmark_verified(
+        self,
+        equipment_id: int,
+        race_id: int | None = None,
+        trailer_id: int | None = None,
+        floor: str | None = None,
+    ) -> None:
         """Remove verification. If race/trailer/floor are omitted, remove ALL
         verification rows for this equipment_id (used by the UI's blanket
         'un-verify' action)."""
         conn = self._connect()
         try:
             if race_id is None and trailer_id is None and floor is None:
-                conn.execute("DELETE FROM verification WHERE equipment_id = ?",
-                            (equipment_id,))
+                conn.execute("DELETE FROM verification WHERE equipment_id = ?", (equipment_id,))
             else:
                 conn.execute(
                     "DELETE FROM verification WHERE equipment_id = ? AND "
@@ -84,7 +88,7 @@ class ChecklistStore:
         finally:
             conn.close()
 
-    def get_verified_ids(self) -> Set[int]:
+    def get_verified_ids(self) -> set[int]:
         conn = self._connect()
         try:
             rows = conn.execute("SELECT DISTINCT equipment_id FROM verification").fetchall()
@@ -92,7 +96,7 @@ class ChecklistStore:
         finally:
             conn.close()
 
-    def list_records(self) -> List[Dict]:
+    def list_records(self) -> list[dict]:
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -104,9 +108,12 @@ class ChecklistStore:
             conn.close()
 
     def set_dimension_correction(
-        self, equipment_id: int, corrected_length: float, corrected_width: float,
-        original_length: Optional[float] = None,
-        original_width: Optional[float] = None,
+        self,
+        equipment_id: int,
+        corrected_length: float,
+        corrected_width: float,
+        original_length: float | None = None,
+        original_width: float | None = None,
         note: str = "",
     ) -> None:
         conn = self._connect()
@@ -116,8 +123,14 @@ class ChecklistStore:
                 "(equipment_id, corrected_length, corrected_width, "
                 " original_length, original_width, note, corrected_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
-                (equipment_id, corrected_length, corrected_width,
-                 original_length, original_width, note),
+                (
+                    equipment_id,
+                    corrected_length,
+                    corrected_width,
+                    original_length,
+                    original_width,
+                    note,
+                ),
             )
             conn.commit()
         finally:
@@ -134,23 +147,21 @@ class ChecklistStore:
         finally:
             conn.close()
 
-    def get_dimension_corrections(self) -> Dict[int, Tuple[float, float]]:
+    def get_dimension_corrections(self) -> dict[int, tuple[float, float]]:
         """Return {equipment_id: (corrected_length, corrected_width)}."""
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT equipment_id, corrected_length, corrected_width "
-                "FROM dimension_correction"
+                "SELECT equipment_id, corrected_length, corrected_width FROM dimension_correction"
             ).fetchall()
             return {
-                int(r["equipment_id"]): (float(r["corrected_length"]),
-                                         float(r["corrected_width"]))
+                int(r["equipment_id"]): (float(r["corrected_length"]), float(r["corrected_width"]))
                 for r in rows
             }
         finally:
             conn.close()
 
-    def list_dimension_corrections(self) -> List[Dict]:
+    def list_dimension_corrections(self) -> list[dict]:
         conn = self._connect()
         try:
             rows = conn.execute(

@@ -5,5 +5,37 @@ requires-python = ">=3.10"
 dependencies = [
     "streamlit",
     "pandas",
-    "plotly",
+    "ortools>=9.15.6755",
+    "matplotlib>=3.10.9",
 ]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.1",
+    "ruff>=0.15.22",
+    "ty>=0.0.62",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["app"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]  # long lines are tolerated in UI/prompt strings
+
+[tool.ruff.lint.per-file-ignores]
+# The test script imports modules next to their first use for readability.
+"app/test_logic.py" = ["E402"]
+
+[tool.ty.environment]
+root = ["app"]
+python-version = "3.10"
+
+# ortools ships no type stubs, so ty can't resolve CpModel's (CamelCase) methods.
+# Silence that one rule only in the packer module that talks to ortools.
+[[tool.ty.overrides]]
+include = ["app/cp_packer.py"]
+
+[tool.ty.overrides.rules]
+unresolved-attribute = "ignore"
