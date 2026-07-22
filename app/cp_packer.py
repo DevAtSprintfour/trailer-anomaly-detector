@@ -212,12 +212,16 @@ class CpPacker:
         gap: float,
         best_effort: bool = False,
         allow_rotation: bool = True,
+        max_start_x: float | None = None,
     ) -> PackResult:
         """Pack ONE floor rectangle (length x width). The harness gap is kept
         both between items AND against every edge of the rectangle, so an item
         must be at least one gap shorter than the floor on each axis to fit.
         When ``allow_rotation`` is False, items keep their load-sheet orientation
-        (no 90° turn). Overflowing items are reported in ``unplaced``
+        (no 90° turn). ``max_start_x`` caps where an item's leading edge may sit:
+        the item may extend (overhang) past it, but must *begin* at or before it
+        — used so dance items anchor in the dance chamber and don't drift wholly
+        past the divider. Overflowing items are reported in ``unplaced``
         (best-effort) or make ``fits`` False (mandatory)."""
         key = (
             "rect",
@@ -226,12 +230,19 @@ class CpPacker:
             _as_int(length),
             _as_int(width),
             _as_int(gap),
+            None if max_start_x is None else _as_int(max_start_x),
             tuple(sorted((it.equipment_id, _as_int(it.length), _as_int(it.width)) for it in items)),
         )
         if key in self._cache:
             return self._cache[key]
         result = self._solve_floor(
-            items, _as_int(length), _as_int(width), _as_int(gap), best_effort, allow_rotation
+            items,
+            _as_int(length),
+            _as_int(width),
+            _as_int(gap),
+            best_effort,
+            allow_rotation,
+            None if max_start_x is None else _as_int(max_start_x),
         )
         self._cache[key] = result
         return result
@@ -270,6 +281,10 @@ class CpPacker:
                 gap,
                 best_effort=best_effort,
                 allow_rotation=container.dance_rotation,
+                # Dance items must begin within the dance chamber; a single long
+                # item may overhang the divider, but one that would sit wholly
+                # past it is dance overflow (never spills into the general floor).
+                max_start_x=container.exclusion_x,
             )
             placements.extend(res.placements)  # dance floor is offset 0
             unplaced.extend(res.unplaced)
@@ -307,7 +322,7 @@ class CpPacker:
         return PackResult(fits, placements, unplaced, used, report, status)
 
     def _solve_floor(
-        self, items, length, width, gap, best_effort, allow_rotation=True
+        self, items, length, width, gap, best_effort, allow_rotation=True, max_start_x=None
     ) -> PackResult:
         """Solve one floor rectangle (hard length cap via the inflate trick).
 
@@ -352,6 +367,12 @@ class CpPacker:
 
             x = model.NewIntVar(0, max(W, 0), f"x_{i}")
             y = model.NewIntVar(0, max(H, 0), f"y_{i}")
+            if max_start_x is not None:
+                # The leading edge (real x = solver x + gap) must begin at or
+                # before max_start_x; the item may still overhang past it. An
+                # item that cannot start in-bounds drops out (best-effort) or
+                # makes the floor infeasible (mandatory).
+                model.Add(x + gap <= max_start_x).OnlyEnforceIf(present)
             x_end = model.NewIntVar(0, max(W, 0), f"xe_{i}")
             y_end = model.NewIntVar(0, max(H, 0), f"ye_{i}")
             model.Add(x_end == x + w_eff).OnlyEnforceIf(present)

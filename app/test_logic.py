@@ -111,6 +111,24 @@ check(
 v = analyze(mk([row(1, 9, "T-1", 1, 111, 140, 60, desc="overhangs-but-fits")]), gap=2, geom={})
 check("dance item overhanging the line still fits -> PASS", v[111]["status"] == PASS)
 
+# Two dance items that can't sit side-by-side (35+62 widths + gaps > 98) can't
+# both start before the divider. One overhangs and PASSes; the other is dance
+# overflow (AMBIGUOUS) — it must NOT drift into the general floor (T-24 case).
+v = analyze(
+    mk(
+        [
+            row(1, 9, "T-24", 1, 7089, 135, 35, desc="47 PRC"),
+            row(1, 9, "T-24", 2, 7110, 137, 62, desc="10 Pit"),
+        ]
+    ),
+    gap=2,
+    geom={},
+)
+statuses = {v[7089]["status"], v[7110]["status"]}
+check("second dance item overflows -> exactly one AMBIGUOUS", statuses == {PASS, AMBIGUOUS})
+overflow_eid = 7089 if v[7089]["status"] == AMBIGUOUS else 7110
+check("dance spillover is dance_overflow", v[overflow_eid]["kind"] == "dance_overflow")
+
 # --- Too-wide item on the general floor -> FAIL (overflows the floor) ---
 v = analyze(mk([row(1, 9, "T-1", 5, 120, 120, 110, desc="too-wide")]), gap=2, geom={})
 check("too-wide general item -> FAIL", v[120]["status"] == FAIL)
@@ -268,16 +286,24 @@ check(
     "9001" in labels and "CTS1 TB Stack" in labels and ("60×38" in labels or "60x38" in labels),
 )
 
-# General overflow item is drawn in the "could not place" lane below the floor
+# General overflow item is drawn INSIDE the trailer (not below it), flagged
+# "did not fit", and stays within the trailer's width band.
 fig2 = renderer.figure(
     cont,
     [PackItem(9004, 500, 40, SIDE_GENERAL, "too-long"), PackItem(9005, 40, 30, SIDE_GENERAL, "ok")],
     {},
 )
-labels2 = " ".join(t.get_text() for t in fig2.axes[0].texts)
+ax2 = fig2.axes[0]
+labels2 = " ".join(t.get_text() for t in ax2.texts)
 check("overflow item is drawn too", "9004" in labels2 and "9005" in labels2)
-check("could-not-place lane is labelled", "could not place" in labels2)
-check("overflow lane sits below the floor", fig2.axes[0].get_ylim()[0] < -10)
-check("overflow is summarised in the title", "overflow" in (fig2.axes[0].get_title().lower()))
+check("overflow item marked did-not-fit", "did not fit" in labels2)
+check("overflow is drawn inside the trailer band, not below", ax2.get_ylim()[0] == -10)
+overflow_box = next(
+    r
+    for r in ax2.patches
+    if isinstance(r, Rectangle) and abs(r.get_width() - 500) < 1 and r.get_hatch()
+)
+check("overflow box sits within the trailer width", overflow_box.get_y() >= 0)
+check("overflow is summarised in the title", "overflow" in (ax2.get_title().lower()))
 
 print("\nALL TESTS PASSED")

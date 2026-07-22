@@ -177,6 +177,10 @@ def analyze(
                 gap,
                 best_effort=True,
                 allow_rotation=c.rotation_for(FLOOR_DANCE),
+                # A dance item may overhang the divider but must begin in the
+                # dance chamber; one that would sit wholly past it overflows the
+                # dance floor (AMBIGUOUS) instead of consuming the general floor.
+                max_start_x=c.exclusion_x,
             )
             dance_extent = max((p.x + p.w for p in res.placements), default=0.0)
             for it in res.unplaced:
