@@ -4,8 +4,8 @@ One dashed container rectangle (0..total_length × 0..width), a solid blue
 exclusion line at ``x = dance_length`` with a light buffer corridor, a red
 dotted "bounding length" line at the packed length, and one tab20-coloured
 box per equipment placed at its CP-SAT solver position. Each box is labelled
-``#id / name / L×W``. Width-impossible items (short side > interior width) can't
-be placed and are drawn hatched at the nose.
+``#id / name / L×W``. Overflow items that cannot be placed are not drawn — they
+have no valid position — but are summarised in the title.
 
 Uses the same :class:`cp_packer.CpPacker` engine as analysis.
 """
@@ -33,9 +33,6 @@ CONTAINER_EDGE = "black"
 EXCLUSION_COLOR = "#1f77b4"
 BUFFER_COLOR = "#87ceeb"
 BOUND_COLOR = "#d62728"
-# Overflow colours by floor: general -> FAIL (red), dance -> AMBIGUOUS (amber).
-OVERFLOW_FILL = {SIDE_GENERAL: "#f9d7d7", SIDE_DANCE: "#f7e6b8"}
-OVERFLOW_EDGE = {SIDE_GENERAL: "#cf222e", SIDE_DANCE: "#bf8700"}
 
 
 def _short(label: str, n: int = 18) -> str:
@@ -57,41 +54,17 @@ class TrailerRenderer:
             return exact
         return self.packer.pack_best_effort(items, container)
 
-    def _unplaced_layout(
-        self, unplaced: list[PackItem], container: ContainerSpec
-    ) -> list[Placement]:
-        """Root overflow items at their floor's nose (dance at 0, general behind
-        the line), stacked across the width."""
-        out: list[Placement] = []
-        cursor = {SIDE_DANCE: 0.0, SIDE_GENERAL: 0.0}
-        nose = {SIDE_DANCE: 0.0, SIDE_GENERAL: container.exclusion_x}
-        for it in unplaced:
-            w = max(it.length, it.width)
-            h = min(it.length, it.width)
-            y = cursor[it.side]
-            if y > 0 and y + h > container.width:
-                y = 0.0
-            out.append(Placement(it.equipment_id, nose[it.side], y, w, h, it.side))
-            cursor[it.side] = y + h + container.padding
-        return out
-
-    def _draw_box(self, ax, p: Placement, item: PackItem | None, color, wont_pack: bool) -> None:
-        if wont_pack:
-            face = OVERFLOW_FILL.get(p.side, "#f9d7d7")
-            edge = OVERFLOW_EDGE.get(p.side, "#cf222e")
-        else:
-            face, edge = color, "black"
+    def _draw_box(self, ax, p: Placement, item: PackItem | None, color) -> None:
         ax.add_patch(
             Rectangle(
                 (p.x, p.y),
                 p.w,
                 p.h,
-                facecolor=face,
-                edgecolor=edge,
+                facecolor=color,
+                edgecolor="black",
                 alpha=0.85,
                 linewidth=1.5,
-                linestyle="--" if wont_pack else "-",
-                hatch="///" if wont_pack else None,
+                linestyle="-",
                 zorder=3,
             )
         )
@@ -162,11 +135,10 @@ class TrailerRenderer:
             label=f"packed length ({bound:.0f})",
         )
 
-        # Placed boxes in tab20 colours; width-impossible ones hatched at nose.
+        # Placed boxes in tab20 colours. Overflow (unplaced) items are NOT drawn
+        # — they have no valid position — but are still summarised in the title.
         for idx, p in enumerate(result.placements):
-            self._draw_box(ax, p, by_id.get(p.equipment_id), cmap(idx % 20), wont_pack=False)
-        for p in self._unplaced_layout(result.unplaced, container):
-            self._draw_box(ax, p, by_id.get(p.equipment_id), None, wont_pack=True)
+            self._draw_box(ax, p, by_id.get(p.equipment_id), cmap(idx % 20))
 
         title = f"Packed {len(result.placements)} items · bounding length {bound:.0f} of {total_len:.0f} in"
         if result.unplaced:

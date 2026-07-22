@@ -8,10 +8,10 @@ The whole trailer is ONE container laid along its length axis:
 
 The floors are packed front-to-back as one continuous rectangle. Dance items
 pack first, from the front against the whole trailer length, and may overhang the
-nominal ``dance_length`` line. General items then pack in the general floor, which
-starts after the dance equipment's real extent plus one harness gap — but never
-before the ``dance_length`` line, so every item stays strictly in its assigned
-floor. Items may rotate 90° unless rotation is disabled for that floor (per-floor
+nominal ``dance_length`` line. General items then pack in the general floor: if a dance item
+overflows the ``dance_length`` line, general starts one harness gap after the
+dance equipment's real extent; otherwise it starts one harness gap after the
+line — so every item stays strictly in its assigned floor. Items may rotate 90° unless rotation is disabled for that floor (per-floor
 ``dance_rotation`` / ``general_rotation`` flags). The harness ``padding`` gap is
 kept between items AND against the trailer walls, and between the dance equipment
 and the general floor. An item that cannot fit its floor is an *overflow* — returned
@@ -83,10 +83,12 @@ class ContainerSpec:
 
     def general_start(self, dance_extent: float) -> float:
         """Where the general floor begins along X, given the dance equipment's
-        real rightmost extent. General items stay strictly in the general floor
-        (never before the ``dance_length`` line) and always clear the dance
-        equipment by one harness gap when it overhangs the line."""
-        return max(self.dance_length, dance_extent + self.padding)
+        real rightmost extent. If a dance item overflows the ``dance_length``
+        line, general items pack one harness gap after that real extent;
+        otherwise they pack one harness gap after the line. Either way the gap
+        sits after whichever boundary is further back, so the reserved margin
+        never eats into the dance chamber."""
+        return max(self.dance_length, dance_extent) + self.padding
 
 
 @dataclass
@@ -275,9 +277,10 @@ class CpPacker:
             dance_extent = max((p.x + p.w for p in res.placements), default=0.0)
 
         if general_items:
-            # General begins after the dance extent (+gap) but no earlier than the
-            # dividing line. Offset the floor so its own front-wall gap lands the
-            # first general item exactly at that start.
+            # General begins one harness gap after whichever is further back:
+            # the dance extent (when a dance item overflows the line) or the
+            # dividing line itself. Offset the floor so its own front-wall gap
+            # lands the first general item exactly at that start.
             gen_start = container.general_start(dance_extent)
             gen_off = gen_start - gap
             gen_len = max(0.0, total - gen_off)
