@@ -268,14 +268,16 @@ check(
     "9001" in labels and "CTS1 TB Stack" in labels and ("60×38" in labels or "60x38" in labels),
 )
 
-# General overflow item is NOT drawn (only the fitting item + container box)
+# General overflow item is drawn in the "could not place" lane below the floor
 fig2 = renderer.figure(
     cont,
     [PackItem(9004, 500, 40, SIDE_GENERAL, "too-long"), PackItem(9005, 40, 30, SIDE_GENERAL, "ok")],
     {},
 )
 labels2 = " ".join(t.get_text() for t in fig2.axes[0].texts)
-check("overflow item is not drawn", "9004" not in labels2 and "9005" in labels2)
+check("overflow item is drawn too", "9004" in labels2 and "9005" in labels2)
+check("could-not-place lane is labelled", "could not place" in labels2)
+check("overflow lane sits below the floor", fig2.axes[0].get_ylim()[0] < -10)
 check("overflow is summarised in the title", "overflow" in (fig2.axes[0].get_title().lower()))
 
 print("\nALL TESTS PASSED")

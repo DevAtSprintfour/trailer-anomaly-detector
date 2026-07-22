@@ -4,8 +4,10 @@ One dashed container rectangle (0..total_length × 0..width), a solid blue
 exclusion line at ``x = dance_length`` with a light buffer corridor, a red
 dotted "bounding length" line at the packed length, and one tab20-coloured
 box per equipment placed at its CP-SAT solver position. Each box is labelled
-``#id / name / L×W``. Overflow items that cannot be placed are not drawn — they
-have no valid position — but are summarised in the title.
+``#id / name / L×W``. Overflow items that cannot be placed have no valid
+position on the floor, so they are laid out in a separate "could not place"
+lane below the trailer — general overflow in red (FAIL), dance overflow in
+orange (ambiguous) — and summarised in the title.
 
 Uses the same :class:`cp_packer.CpPacker` engine as analysis.
 """
@@ -33,6 +35,8 @@ CONTAINER_EDGE = "black"
 EXCLUSION_COLOR = "#1f77b4"
 BUFFER_COLOR = "#87ceeb"
 BOUND_COLOR = "#d62728"
+FAIL_COLOR = "#cf222e"  # general overflow (FAIL)
+AMBIGUOUS_COLOR = "#f0883e"  # dance overflow (ambiguous)
 
 
 def _short(label: str, n: int = 18) -> str:
@@ -135,10 +139,65 @@ class TrailerRenderer:
             label=f"packed length ({bound:.0f})",
         )
 
-        # Placed boxes in tab20 colours. Overflow (unplaced) items are NOT drawn
-        # — they have no valid position — but are still summarised in the title.
+        # Placed boxes in tab20 colours.
         for idx, p in enumerate(result.placements):
             self._draw_box(ax, p, by_id.get(p.equipment_id), cmap(idx % 20))
+
+        # Overflow (unplaced) items have no valid floor position, so lay them
+        # out in a "could not place" lane below the trailer, coloured by cause.
+        lane_bottom = 0.0
+        lane_right = 0.0
+        if result.unplaced:
+            lane_gap = 18.0
+            lane_top = -lane_gap
+            cursor_x = 0.0
+            spacing = 8.0
+            for it in result.unplaced:
+                color = AMBIGUOUS_COLOR if it.side == SIDE_DANCE else FAIL_COLOR
+                y0 = lane_top - it.width
+                ax.add_patch(
+                    Rectangle(
+                        (cursor_x, y0),
+                        it.length,
+                        it.width,
+                        facecolor=color,
+                        edgecolor="black",
+                        alpha=0.6,
+                        linewidth=1.5,
+                        hatch="xx",
+                        zorder=3,
+                    )
+                )
+                fs = max(6, min(11, int(min(it.length, it.width) * 0.16)))
+                name = _short(it.label) if it.label else ""
+                label = f"#{it.equipment_id}"
+                if name:
+                    label += f"\n{name}"
+                label += f"\n{it.length:.0f}×{it.width:.0f}"
+                ax.text(
+                    cursor_x + it.length / 2,
+                    y0 + it.width / 2,
+                    label,
+                    ha="center",
+                    va="center",
+                    fontsize=fs,
+                    fontweight="bold",
+                    color="#111",
+                    zorder=4,
+                )
+                cursor_x += it.length + spacing
+                lane_bottom = min(lane_bottom, y0)
+                lane_right = max(lane_right, cursor_x)
+            ax.text(
+                -8,
+                lane_top - 2,
+                "could not place",
+                ha="right",
+                va="top",
+                fontsize=9,
+                fontstyle="italic",
+                color="#666",
+            )
 
         title = f"Packed {len(result.placements)} items · bounding length {bound:.0f} of {total_len:.0f} in"
         if result.unplaced:
@@ -152,8 +211,8 @@ class TrailerRenderer:
             title += " · " + ", ".join(bits)
         ax.set_title(title, fontsize=11, pad=8)
 
-        ax.set_xlim(-15, max(total_len, bound) + 15)
-        ax.set_ylim(-10, width + 10)
+        ax.set_xlim(-15, max(total_len, bound, lane_right) + 15)
+        ax.set_ylim(min(-10, lane_bottom - 10), width + 10)
         ax.set_aspect("equal")
         ax.grid(True, linestyle=":", alpha=0.4)
         ax.legend(loc="upper right", fontsize=8)
