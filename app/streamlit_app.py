@@ -5,6 +5,8 @@ Run from the project root:
     streamlit run app/streamlit_app.py
 """
 
+import hashlib
+import inspect
 import os
 
 import matplotlib.pyplot as plt
@@ -36,20 +38,29 @@ from trailer_categories import (
     classify_trailer,
 )
 
+# Hash of the packer implementation. Passed into the cached factory so any
+# change to CpPacker busts st.cache_resource — otherwise a hot-reload (Streamlit
+# Cloud reruns the script but keeps cached resources) would hand back a packer
+# built from the OLD module, crashing when new call sites pass new arguments.
+_PACKER_CODE_VERSION = hashlib.sha1(inspect.getsource(CpPacker).encode("utf-8")).hexdigest()
+
 
 @st.cache_resource
-def get_packer() -> CpPacker:
+def get_packer(code_version: str) -> CpPacker:
     """One packer for the whole session so its solve cache survives reruns.
 
     Without this, every button click recreates the packer and re-solves every
     trailer from scratch (season hints + expanded-trailer render), which is slow.
     A 2s cap keeps cold start bounded — on this data it gives identical overflow
     results to 5s — while the cross-rerun cache makes later clicks near-instant.
+
+    ``code_version`` keys the cache on the packer's source so a redeploy that
+    changes CpPacker rebuilds the instance instead of reusing a stale one.
     """
     return CpPacker(time_limit=2.0)
 
 
-PACKER = get_packer()
+PACKER = get_packer(_PACKER_CODE_VERSION)
 RENDERER = TrailerRenderer(packer=PACKER)
 
 DATA = os.path.join(os.path.dirname(__file__), "..", "data")
