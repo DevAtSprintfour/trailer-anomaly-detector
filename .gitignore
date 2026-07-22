@@ -1,6 +1,3 @@
-# Data-export code lives outside version control (contains DB credentials)
-export/
-
 # Python virtualenv
 .venv/
 __pycache__/
@@ -16,3 +13,6 @@ __pycache__/
 
 # Local checklist/verification state (per-machine, not shared)
 data/checklist.db
+
+# Local secrets
+.env

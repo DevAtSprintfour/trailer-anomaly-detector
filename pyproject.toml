@@ -7,6 +7,9 @@ dependencies = [
     "pandas",
     "ortools>=9.15.6755",
     "matplotlib>=3.10.9",
+    "psycopg2-binary>=2.9.12",
+    "python-dotenv>=1.2.2",
+    "pymysql>=1.2.0",
 ]
 
 [dependency-groups]
