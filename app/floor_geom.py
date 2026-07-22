@@ -46,8 +46,9 @@ side_for_slot = floor_for_slot
 def container_for_geom(geom: dict | None = None, padding: float = DEFAULT_PADDING) -> ContainerSpec:
     """Build a :class:`ContainerSpec` from a (partial) geometry dict.
 
-    ``geom`` may hold ``dance_length`` / ``general_length`` / ``width``;
-    anything missing falls back to :data:`DEFAULT_GEOM`.
+    ``geom`` may hold ``dance_length`` / ``general_length`` / ``width`` plus the
+    optional rotation flags ``dance_rotation`` / ``general_rotation``; anything
+    missing falls back to :data:`DEFAULT_GEOM` (rotation defaults to True).
     """
     g = {**DEFAULT_GEOM, **(geom or {})}
     return ContainerSpec(
@@ -55,4 +56,6 @@ def container_for_geom(geom: dict | None = None, padding: float = DEFAULT_PADDIN
         general_length=float(g["general_length"]),
         width=float(g["width"]),
         padding=float(padding),
+        dance_rotation=bool(g.get("dance_rotation", True)),
+        general_rotation=bool(g.get("general_rotation", True)),
     )

@@ -6,11 +6,15 @@ The whole trailer is ONE container laid along its length axis:
        |<--- dance chamber --->|<---------- general chamber ---------->|
     Y: 0 ............................................ width (interior)
 
-The two floors are packed as SEPARATE rectangles against their real lengths:
-the dance floor (``dance_length x width``) and the general floor
-(``general_length x width``). Items may rotate 90°. The harness ``padding`` gap
-is kept ONLY between items, never against the walls, so a floor-length item fits
-its floor exactly. An item that cannot fit its floor is an *overflow* — returned
+The floors are packed front-to-back as one continuous rectangle. Dance items
+pack first, from the front against the whole trailer length, and may overhang the
+nominal ``dance_length`` line. General items then pack in the general floor, which
+starts after the dance equipment's real extent plus one harness gap — but never
+before the ``dance_length`` line, so every item stays strictly in its assigned
+floor. Items may rotate 90° unless rotation is disabled for that floor (per-floor
+``dance_rotation`` / ``general_rotation`` flags). The harness ``padding`` gap is
+kept between items AND against the trailer walls, and between the dance equipment
+and the general floor. An item that cannot fit its floor is an *overflow* — returned
 in ``unplaced`` (best-effort) or making ``fits`` False (mandatory). Callers apply
 severity by floor: dance overflow is AMBIGUOUS, general overflow is FAIL.
 
@@ -60,6 +64,8 @@ class ContainerSpec:
     general_length: float
     width: float
     padding: float = 2.0
+    dance_rotation: bool = True  # may dance-floor items be rotated 90°?
+    general_rotation: bool = True  # may general-floor items be rotated 90°?
 
     @property
     def total_length(self) -> float:
@@ -71,6 +77,16 @@ class ContainerSpec:
 
     def chamber_length(self, side: str) -> float:
         return self.dance_length if side == SIDE_DANCE else self.general_length
+
+    def rotation_for(self, side: str) -> bool:
+        return self.dance_rotation if side == SIDE_DANCE else self.general_rotation
+
+    def general_start(self, dance_extent: float) -> float:
+        """Where the general floor begins along X, given the dance equipment's
+        real rightmost extent. General items stay strictly in the general floor
+        (never before the ``dance_length`` line) and always clear the dance
+        equipment by one harness gap when it overhangs the line."""
+        return max(self.dance_length, dance_extent + self.padding)
 
 
 @dataclass
@@ -193,14 +209,18 @@ class CpPacker:
         width: float,
         gap: float,
         best_effort: bool = False,
+        allow_rotation: bool = True,
     ) -> PackResult:
         """Pack ONE floor rectangle (length x width). The harness gap is kept
-        only between items (never against the walls), so a length-long item fits
-        exactly. Overflowing items are reported in ``unplaced`` (best-effort) or
-        make ``fits`` False (mandatory)."""
+        both between items AND against every edge of the rectangle, so an item
+        must be at least one gap shorter than the floor on each axis to fit.
+        When ``allow_rotation`` is False, items keep their load-sheet orientation
+        (no 90° turn). Overflowing items are reported in ``unplaced``
+        (best-effort) or make ``fits`` False (mandatory)."""
         key = (
             "rect",
             best_effort,
+            allow_rotation,
             _as_int(length),
             _as_int(width),
             _as_int(gap),
@@ -209,7 +229,7 @@ class CpPacker:
         if key in self._cache:
             return self._cache[key]
         result = self._solve_floor(
-            items, _as_int(length), _as_int(width), _as_int(gap), best_effort
+            items, _as_int(length), _as_int(width), _as_int(gap), best_effort, allow_rotation
         )
         self._cache[key] = result
         return result
@@ -222,41 +242,89 @@ class CpPacker:
 
     # ---- internals ------------------------------------------------------
     def _combine(self, items, container, best_effort) -> PackResult:
-        """Pack dance items in the front floor and general items in the rear
-        floor, each against its real length; merge into one container view."""
+        """Pack the trailer as ONE continuous rectangle, front to back.
+
+        Dance items pack first, from the front against the whole trailer length
+        (they may overhang the nominal ``dance_length`` line). General items then
+        pack in the general floor, which begins after the dance equipment's real
+        extent plus one harness gap — but never before the ``dance_length`` line,
+        so every item stays strictly in its assigned floor. Both floors keep the
+        harness gap against the trailer walls."""
         gap, width = container.padding, container.width
+        total = container.total_length
         placements: list[Placement] = []
         unplaced: list[PackItem] = []
-        used = 0.0
         fits = True
-        for side, length, x_off in (
-            (SIDE_DANCE, container.dance_length, 0.0),
-            (SIDE_GENERAL, container.general_length, container.dance_length),
-        ):
-            side_items = [it for it in items if it.side == side]
-            if not side_items:
-                continue
-            res = self.pack_floor(side_items, length, width, gap, best_effort=best_effort)
+
+        dance_items = [it for it in items if it.side == SIDE_DANCE]
+        general_items = [it for it in items if it.side == SIDE_GENERAL]
+
+        dance_extent = 0.0
+        if dance_items:
+            res = self.pack_floor(
+                dance_items,
+                total,
+                width,
+                gap,
+                best_effort=best_effort,
+                allow_rotation=container.dance_rotation,
+            )
+            placements.extend(res.placements)  # dance floor is offset 0
+            unplaced.extend(res.unplaced)
+            fits = fits and res.fits
+            dance_extent = max((p.x + p.w for p in res.placements), default=0.0)
+
+        if general_items:
+            # General begins after the dance extent (+gap) but no earlier than the
+            # dividing line. Offset the floor so its own front-wall gap lands the
+            # first general item exactly at that start.
+            gen_start = container.general_start(dance_extent)
+            gen_off = gen_start - gap
+            gen_len = max(0.0, total - gen_off)
+            res = self.pack_floor(
+                general_items,
+                gen_len,
+                width,
+                gap,
+                best_effort=best_effort,
+                allow_rotation=container.general_rotation,
+            )
             for p in res.placements:
                 placements.append(
-                    Placement(p.equipment_id, p.x + x_off, p.y, p.w, p.h, side, p.rotated)
+                    Placement(p.equipment_id, p.x + gen_off, p.y, p.w, p.h, SIDE_GENERAL, p.rotated)
                 )
             unplaced.extend(res.unplaced)
-            used = max(used, (res.total_width_used or 0.0) + x_off)
             fits = fits and res.fits
+
+        used = max((p.x + p.w for p in placements), default=0.0)
         report = None if fits else self._build_report(items, container)
         status = "OPTIMAL" if fits else "OVERFLOW"
         if not best_effort and not fits:
             placements = []  # mandatory pack returns nothing on overflow
         return PackResult(fits, placements, unplaced, used, report, status)
 
-    def _solve_floor(self, items, length, width, gap, best_effort) -> PackResult:
-        """Solve one floor rectangle (hard length cap via the inflate trick)."""
+    def _solve_floor(
+        self, items, length, width, gap, best_effort, allow_rotation=True
+    ) -> PackResult:
+        """Solve one floor rectangle (hard length cap via the inflate trick).
+
+        The gap is reserved against the walls too: we pack into a rectangle
+        shrunk by ``gap`` on every edge, then shift every placement out by
+        ``gap`` so the reserved margin sits between the equipment and the
+        chamber boundary. Inside that shrunk region the classic inflate trick
+        (bin +gap, each item +gap) keeps the same gap between neighbours."""
         if not items:
             return PackResult(True, [], [], 0.0, None, "EMPTY")
 
-        W = length + gap  # inflated bin: an item of `length` fits exactly
-        H = width + gap
+        # Usable interior after reserving a wall gap on both ends of each axis.
+        usable_len = length - 2 * gap
+        usable_wid = width - 2 * gap
+        if usable_len < 0 or usable_wid < 0:
+            # Chamber can't even hold the wall margins — nothing fits.
+            return PackResult(not items, [], list(items), 0.0, None, "INFEASIBLE")
+
+        W = usable_len + gap  # inflated bin over the shrunk interior
+        H = usable_wid + gap
 
         model = cp_model.CpModel()
         x_intervals, y_intervals, presences, vars_ = [], [], [], []
@@ -271,7 +339,7 @@ class CpPacker:
             present = model.NewBoolVar(f"p_{i}") if best_effort else model.NewConstant(1)
             presences.append(present)
 
-            r = model.NewBoolVar(f"r_{i}")
+            r = model.NewBoolVar(f"r_{i}") if allow_rotation else model.NewConstant(0)
             w_eff = model.NewIntVar(0, big, f"we_{i}")
             h_eff = model.NewIntVar(0, big, f"he_{i}")
             model.Add(w_eff == wp).OnlyEnforceIf([r.Not(), present])
@@ -318,25 +386,30 @@ class CpPacker:
             placements.append(
                 Placement(
                     equipment_id=it.equipment_id,
-                    x=float(solver.Value(v["x"])),
-                    y=float(solver.Value(v["y"])),
+                    # Shift out by the reserved wall gap so the margin sits
+                    # between the equipment and the chamber boundary.
+                    x=float(solver.Value(v["x"])) + gap,
+                    y=float(solver.Value(v["y"])) + gap,
                     w=_as_int(it.width) if rot else _as_int(it.length),
                     h=_as_int(it.length) if rot else _as_int(it.width),
                     side=it.side,
                     rotated=rot,
                 )
             )
-        used_len = float(solver.Value(max_len))
+        used_len = float(solver.Value(max_len)) + gap
         fits = not unplaced if best_effort else True
         return PackResult(fits, placements, unplaced, used_len, None, status_name)
 
     def _build_report(self, items: list[PackItem], container: ContainerSpec) -> AnomalyReport:
-        """Explain a failure. Usable length per chamber is the full chamber
-        length (edge gaps don't count); usable height is the full width."""
-        usable_h = container.width
-        left_w = container.dance_length
-        right_w = container.general_length
-        total_usable = (left_w + right_w) * usable_h
+        """Explain a failure. The trailer is one continuous rectangle with the
+        harness gap reserved against the walls, so usable height is the width
+        minus twice the gap. A dance item may overhang, so it fits anywhere in
+        the trailer length; a general item is bounded by the general floor."""
+        gap = container.padding
+        usable_h = container.width - 2 * gap
+        left_w = container.total_length - 2 * gap  # dance may use the whole trailer
+        right_w = container.general_length - 2 * gap
+        total_usable = (container.total_length - 2 * gap) * usable_h
 
         oversized: list[OversizedItem] = []
         total_area = 0.0

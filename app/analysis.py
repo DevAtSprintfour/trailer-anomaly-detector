@@ -152,38 +152,69 @@ def analyze(
     missing_ids -= set(overrides)  # an override supplies dims
     eq_ids = set(df["equipment_id"].dropna().astype(int))
 
-    # Overflow per floor: pack each chamber against its real length; the items
-    # that don't fit are the overflow, flagged by floor severity.
+    # Overflow: the trailer is one continuous rectangle packed front-to-back.
+    # Dance items pack first against the whole trailer length (they may overhang
+    # the line); general items then pack in the general floor, which starts after
+    # the dance equipment's real extent + a gap (never before the dividing line).
+    # Items that don't fit are the overflow, flagged by floor severity.
     general_bad: dict[int, dict] = {}  # eid -> evidence  (FAIL)
     dance_bad: dict[int, dict] = {}  # eid -> evidence  (AMBIGUOUS)
 
-    def _floor_len(f: TrailerFloor, side: str) -> float:
-        base = f.container.dance_length if side == FLOOR_DANCE else f.container.general_length
-        return base + tolerance
-
     for f in floors:
-        for side, target in ((FLOOR_DANCE, dance_bad), (FLOOR_GENERAL, general_bad)):
-            side_items = [
-                it for it in f.items if it.side == side and it.equipment_id not in verified
-            ]
-            if not side_items:
-                continue
+        c = f.container
+        total_len = c.total_length + tolerance
+        width = c.width + tolerance
+        active = [it for it in f.items if it.equipment_id not in verified]
+
+        # Dance first, against the whole trailer; its extent shifts general back.
+        dance_items = [it for it in active if it.side == FLOOR_DANCE]
+        dance_extent = 0.0
+        if dance_items:
             res = pk.pack_floor(
-                side_items,
-                _floor_len(f, side),
-                f.container.width + tolerance,
+                dance_items,
+                total_len,
+                width,
                 gap,
                 best_effort=True,
+                allow_rotation=c.rotation_for(FLOOR_DANCE),
+            )
+            dance_extent = max((p.x + p.w for p in res.placements), default=0.0)
+            for it in res.unplaced:
+                dance_bad.setdefault(
+                    it.equipment_id,
+                    dict(
+                        floor=FLOOR_DANCE,
+                        race=f.race_id,
+                        trailer=f.trailer_name,
+                        cap_length=total_len,
+                        cap_width=c.width,
+                    ),
+                )
+
+        # General in the general floor, after the dance extent.
+        general_items = [it for it in active if it.side == FLOOR_GENERAL]
+        if general_items:
+            gen_off = c.general_start(dance_extent) - gap
+            gen_len = max(0.0, total_len - gen_off)
+            res = pk.pack_floor(
+                general_items,
+                gen_len,
+                width,
+                gap,
+                best_effort=True,
+                allow_rotation=c.rotation_for(FLOOR_GENERAL),
             )
             for it in res.unplaced:
-                info = dict(
-                    floor=side,
-                    race=f.race_id,
-                    trailer=f.trailer_name,
-                    cap_length=_floor_len(f, side),
-                    cap_width=f.container.width,
+                general_bad.setdefault(
+                    it.equipment_id,
+                    dict(
+                        floor=FLOOR_GENERAL,
+                        race=f.race_id,
+                        trailer=f.trailer_name,
+                        cap_length=gen_len,
+                        cap_width=c.width,
+                    ),
                 )
-                target.setdefault(it.equipment_id, info)
 
     verdict: dict[int, dict] = {}
     for eid in eq_ids:

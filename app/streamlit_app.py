@@ -117,6 +117,17 @@ gap = st.sidebar.slider(
     help="Gap reserved between adjacent equipment on a floor.",
 )
 
+dance_rotation = st.sidebar.toggle(
+    "Dance floor: items can rotate",
+    value=True,
+    help="On: dance-floor equipment may be turned 90° to fit. Off: keep load-sheet orientation.",
+)
+general_rotation = st.sidebar.toggle(
+    "General floor: items can rotate",
+    value=True,
+    help="On: general-floor equipment may be turned 90° to fit. Off: keep load-sheet orientation.",
+)
+
 cross_ref = st.sidebar.toggle(
     "Cross-reference blame isolation",
     value=True,
@@ -157,7 +168,13 @@ with st.sidebar.expander("Floor dimensions by trailer category (tunable)", expan
             step=1.0,
             key=f"wd_{cat}",
         )
-        category_geom[cat] = dict(dance_length=dl, general_length=gl, width=wd)
+        category_geom[cat] = dict(
+            dance_length=dl,
+            general_length=gl,
+            width=wd,
+            dance_rotation=dance_rotation,
+            general_rotation=general_rotation,
+        )
     if st.button("Reset all categories to defaults"):
         for cat in ALL_CATEGORIES:
             for prefix in ("dl_", "gl_", "wd_"):
@@ -167,7 +184,7 @@ with st.sidebar.expander("Floor dimensions by trailer category (tunable)", expan
 # geom stays as the flat legacy fallback for any category not in category_geom
 # (shouldn't happen since every ALL_CATEGORIES entry is always populated above,
 # but build_used_floors/analyze still accept a fallback for safety).
-geom = dict(DEFAULT_GEOM)
+geom = dict(DEFAULT_GEOM, dance_rotation=dance_rotation, general_rotation=general_rotation)
 
 # ------------------------------------------------------------------ data + season-wide hints
 work = ls[ls["trailer_view"].isin(sel_views)].copy()

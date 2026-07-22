@@ -1,7 +1,8 @@
 """Tests for the CP-SAT trailer packer + blame. Run: python test_logic.py
 
 Model note: each floor is packed against its REAL length (dance 129, general 483)
-with the harness gap only between items. Items that overflow their floor are
+with the harness gap reserved both between items and against every chamber edge.
+Items that overflow their floor are
 flagged by floor severity: general-floor overflow -> FAIL, dance-floor overflow
 -> AMBIGUOUS.
 """
@@ -51,13 +52,32 @@ check("total length is dance+general", c.total_length == 612.0)
 check("empty container packs", PK.pack([], c).fits)
 check("single item packs", PK.pack([PackItem(1, 40, 30, SIDE_GENERAL)], c).fits)
 
-# pack_floor: an item as long as the floor fits; longer overflows
-check("floor-length item fits its floor", PK.pack_floor([PackItem(1, 129, 90)], 129, 98, 2).fits)
+# pack_floor: the harness gap is reserved against the walls too, so an item must
+# be at least one gap shorter than the floor on each axis. With gap=2 the 129
+# floor admits up to 125; the full 129 no longer fits.
+check(
+    "item one gap shy of the floor fits",
+    PK.pack_floor([PackItem(1, 125, 90)], 129, 98, 2).fits,
+)
+check(
+    "floor-length item overflows (needs wall gap)",
+    not PK.pack_floor([PackItem(1, 129, 90)], 129, 98, 2).fits,
+)
 check(
     "over-long item overflows its floor",
     not PK.pack_floor([PackItem(1, 140, 60)], 129, 98, 2).fits,
 )
 check("too-wide item overflows floor", not PK.pack_floor([PackItem(1, 120, 110)], 483, 98, 2).fits)
+
+# Rotation toggle: a 55x95 item only fits a 100x60 floor if it may turn 90°.
+check(
+    "rotatable item fits when rotation allowed",
+    PK.pack_floor([PackItem(1, 55, 95)], 100, 60, 0, allow_rotation=True).fits,
+)
+check(
+    "same item overflows when rotation disallowed",
+    not PK.pack_floor([PackItem(1, 55, 95)], 100, 60, 0, allow_rotation=False).fits,
+)
 
 # Container pack: dance item within 129 + general item within 483
 check(
@@ -80,11 +100,16 @@ v = analyze(mk([row(1, 9, "T-1", 5, 100, 500, 40, desc="too-long-general")]), ga
 check("general overflow -> FAIL", v[100]["status"] == FAIL and v[100]["kind"] == "general_overflow")
 
 # --- DANCE overflow -> AMBIGUOUS ---
-v = analyze(mk([row(1, 9, "T-1", 1, 110, 140, 60, desc="too-long-dance")]), gap=2, geom={})
+# Dance items may overhang the dividing line, so a 140-long one now fits; a dance
+# item overflows only if it can't fit the WHOLE trailer (612 long).
+v = analyze(mk([row(1, 9, "T-1", 1, 110, 700, 60, desc="too-long-dance")]), gap=2, geom={})
 check(
     "dance overflow -> AMBIGUOUS",
     v[110]["status"] == AMBIGUOUS and v[110]["kind"] == "dance_overflow",
 )
+# A dance item that overhangs the line but fits the trailer -> PASS.
+v = analyze(mk([row(1, 9, "T-1", 1, 111, 140, 60, desc="overhangs-but-fits")]), gap=2, geom={})
+check("dance item overhanging the line still fits -> PASS", v[111]["status"] == PASS)
 
 # --- Too-wide item on the general floor -> FAIL (overflows the floor) ---
 v = analyze(mk([row(1, 9, "T-1", 5, 120, 120, 110, desc="too-wide")]), gap=2, geom={})
@@ -118,7 +143,7 @@ check("dance and general both PASS", v[600]["status"] == PASS and v[601]["status
 v = analyze(
     mk(
         [
-            row(6, 9, "T-6", 1, 700, 140, 60, desc="dance-overflow-here"),
+            row(6, 9, "T-6", 1, 700, 700, 60, desc="dance-overflow-here"),
             row(6, 20, "T-6b", 5, 700, 500, 40, desc="general-overflow-there"),
         ]
     ),
