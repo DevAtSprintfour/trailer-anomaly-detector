@@ -31,6 +31,7 @@ from floor_geom import (
     FLOOR_GENERAL,
     floor_for_slot,
 )
+from loadsheet_source import fetch_loadsheet
 from packing_viz import TrailerRenderer
 from trailer_categories import (
     ALL_CATEGORIES,
@@ -75,28 +76,24 @@ STATUS_COLOR = {
 st.set_page_config(page_title="Trailer Floor Anomaly Detector", layout="wide")
 
 
-@st.cache_data
-def load_data(_ls_mtime: float, _races_mtime: float):
-    """Load loadsheet and always attach race_name from races_2026.csv.
+@st.cache_data(ttl=600)
+def load_data():
+    """Read the load sheet live from the Champschedule + WMS databases.
 
-    mtime args bust Streamlit's cache when the CSVs change on disk.
+    Cached for 10 min (freshness) and cleared by the sidebar reload button.
+    race_name is attached by the query, so nothing needs re-merging here.
     """
-    ls = pd.read_csv(os.path.join(DATA, "loadsheet_2026.csv"))
-    races_path = os.path.join(DATA, "races_2026.csv")
-    if os.path.exists(races_path):
-        races = pd.read_csv(races_path)[["race_id", "race_name"]].drop_duplicates("race_id")
-        if "race_name" in ls.columns:
-            ls = ls.drop(columns=["race_name"])
-        ls = ls.merge(races, on="race_id", how="left")
-    return ls
+    return fetch_loadsheet()
 
 
-_ls_path = os.path.join(DATA, "loadsheet_2026.csv")
-_races_path = os.path.join(DATA, "races_2026.csv")
-ls = load_data(
-    os.path.getmtime(_ls_path),
-    os.path.getmtime(_races_path) if os.path.exists(_races_path) else 0.0,
-)
+try:
+    ls = load_data()
+except Exception as exc:  # no CSV fallback — surface a clear message, not a traceback
+    st.error(
+        "Could not reach the databases — check credentials/connectivity.\n\n"
+        f"{type(exc).__name__}: {exc}"
+    )
+    st.stop()
 
 CHECKLIST_DB = os.path.join(DATA, "checklist.db")
 checklist = ChecklistStore(CHECKLIST_DB)
@@ -106,7 +103,10 @@ dim_overrides = checklist.get_dimension_corrections()
 # ------------------------------------------------------------------ sidebar
 st.sidebar.title("Controls")
 st.sidebar.caption("2026 season · load sheet trusted · floor-level 2D packing")
-if st.sidebar.button("Reload data (clear cache)"):
+if st.sidebar.button(
+    "Reload data (re-query databases)",
+    help="Clears the cache and pulls a fresh load sheet from Champschedule + WMS.",
+):
     st.cache_data.clear()
     st.rerun()
 

@@ -1,6 +1,6 @@
 """Trailer name -> category classification, and per-category geometry.
 
-Trailer names follow a handful of patterns (see data/trailers_2026.csv):
+Trailer names follow a handful of patterns (champschedule_trailer.name):
   T-NN       -> standard T-series (e.g. T-02, T-07, T-38)
   T-NN Top   -> a "Top" variant of the T-series (e.g. T-12 Top)
   F-NN       -> F-series (e.g. F-10)

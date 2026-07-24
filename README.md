@@ -16,13 +16,10 @@ The packing model is ported from `Champion/anomaly-detection/plot.py`.
 ```
 trailer-anomaly/
 ├── .venv/                 Python virtualenv
-├── data/                  exported CSVs (the analysis input)
-│   ├── loadsheet_2026.csv    5,613 assignments, dims joined
-│   ├── equipment_2026.csv    284 distinct equipment
-│   ├── trailers_2026.csv     30 trailers + view class
-│   ├── slots_2026.csv        slot occupancy (reference)
+├── data/                  local state
 │   └── checklist.db          local SQLite verification state (gitignored)
 ├── app/                   the analyzer
+│   ├── loadsheet_source.py   reads the load sheet live from Postgres + MySQL
 │   ├── cp_packer.py          OR-Tools CP-SAT container packer + AnomalyReport
 │   ├── floor_geom.py         slot->side classification + ContainerSpec builder
 │   ├── analysis.py           per-(race,trailer) engine + blame isolation
@@ -34,9 +31,8 @@ trailer-anomaly/
 └── docs/DESIGN.md         full design + locked decisions
 ```
 
-> The data-export step (which connects to the production databases with credentials)
-> is intentionally **not** part of this repository. The `data/*.csv` snapshots it
-> produced are committed so the app runs standalone.
+> The app reads its load sheet **directly from the production databases** at
+> runtime (see [Data sources](#data-sources)); it needs credentials to start.
 
 ## Run
 
@@ -79,8 +75,29 @@ Open the local URL Streamlit prints. To run the tests: `uv run python app/test_l
   manually verified.
 
 ## Data sources
-The committed `data/*.csv` were produced from two internal databases:
+The app reads the load sheet **live** (`app/loadsheet_source.py`) from two internal,
+read-only databases, joined on `equipment_id`:
 - **Champschedule** (PostgreSQL): the load sheet (race → trailer → slot → equipment).
 - **WMS** (MySQL): equipment physical dimensions.
-Joined on `equipment_id`. The extraction script and its credentials live outside this
-repository; only the resulting read-only snapshots are committed.
+
+The result is cached for 10 minutes; the sidebar **"Reload data"** button re-queries on
+demand.
+
+### Credentials
+Resolved from `st.secrets` first (for Streamlit Cloud), falling back to the repo-root
+`.env` (local dev). Both are gitignored. Required keys:
+
+```
+# Champschedule (PostgreSQL)
+DB_HOST=…      DB_NAME=…   DB_USER=…   DB_PASSWORD=…   DB_PORT=5432
+# WMS / MODX (MySQL)
+WMS_HOST=…     WMS_NAME=…  WMS_USER=…  WMS_PWD=…       WMS_PORT=3306
+```
+
+For Streamlit Cloud, put the same keys in `.streamlit/secrets.toml`:
+
+```toml
+DB_HOST = "…"
+DB_NAME = "…"
+# … etc.
+```
