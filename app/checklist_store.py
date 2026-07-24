@@ -10,6 +10,7 @@ changes. Persisted at data/checklist.db.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 
 _SCHEMA = """
@@ -37,6 +38,10 @@ CREATE TABLE IF NOT EXISTS dimension_correction (
 class ChecklistStore:
     def __init__(self, db_path: str):
         self.db_path = db_path
+        # On a fresh deploy (e.g. Streamlit Cloud) the data/ dir may not exist,
+        # and sqlite3 can't create the file in a missing directory.
+        parent = os.path.dirname(os.path.abspath(self.db_path))
+        os.makedirs(parent, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         try:
             conn.executescript(_SCHEMA)
