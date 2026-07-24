@@ -130,12 +130,12 @@ gap = st.sidebar.slider(
 
 dance_rotation = st.sidebar.toggle(
     "Dance floor: items can rotate",
-    value=True,
+    value=False,
     help="On: dance-floor equipment may be turned 90° to fit. Off: keep load-sheet orientation.",
 )
 general_rotation = st.sidebar.toggle(
     "General floor: items can rotate",
-    value=True,
+    value=False,
     help="On: general-floor equipment may be turned 90° to fit. Off: keep load-sheet orientation.",
 )
 

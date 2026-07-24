@@ -64,8 +64,8 @@ class ContainerSpec:
     general_length: float
     width: float
     padding: float = 2.0
-    dance_rotation: bool = True  # may dance-floor items be rotated 90°?
-    general_rotation: bool = True  # may general-floor items be rotated 90°?
+    dance_rotation: bool = False  # may dance-floor items be rotated 90°?
+    general_rotation: bool = False  # may general-floor items be rotated 90°?
 
     @property
     def total_length(self) -> float:
